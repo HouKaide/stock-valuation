@@ -1,1 +1,1 @@
-# stock-valuator
+# Stock Valuation App
