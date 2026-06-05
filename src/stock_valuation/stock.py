@@ -16,15 +16,50 @@ if TYPE_CHECKING:
 
 
 class TaxRateProvider(Protocol):
-    """Provider for country-level corporate tax rates."""
+    """Provider for country-level corporate tax rates.
+
+    Methods
+    -------
+    get_corporate_tax_rate(country, valuation_date)
+        Return the marginal corporate tax rate for a country and date.
+    """
 
     def get_corporate_tax_rate(self, country: str, valuation_date: date) -> Decimal:
-        """Return the marginal corporate tax rate for a country and date."""
+        """Return the marginal corporate tax rate for a country and date.
+
+        Parameters
+        ----------
+        country:
+            Company headquarters country.
+        valuation_date:
+            Date used to resolve the applicable tax rate.
+
+        Returns
+        -------
+        Decimal
+            Corporate tax rate as a decimal fraction.
+        """
 
 
 @dataclass(frozen=True)
 class FcffInputs:
-    """Latest normalized inputs needed to calculate free cash flow to the firm."""
+    """Latest normalized inputs needed to calculate free cash flow to the firm.
+
+    Attributes
+    ----------
+    period:
+        Statement period shared by all normalized input series.
+    ebit:
+        Earnings before interest and taxes.
+    tax_rate:
+        Corporate tax rate as a decimal fraction.
+    depreciation_amortization:
+        Depreciation and amortization add-back.
+    capex:
+        Capital expenditures as a positive outflow.
+    change_in_non_cash_working_capital:
+        Increase in non-cash working capital as a positive outflow.
+    """
 
     period: Any
     ebit: Decimal
@@ -35,14 +70,32 @@ class FcffInputs:
 
     @property
     def nopat(self) -> Decimal:
-        """Return EBIT after tax."""
+        """Return EBIT after tax.
+
+        Returns
+        -------
+        Decimal
+            Net operating profit after tax.
+        """
 
         return self.ebit * (Decimal("1") - self.tax_rate)
 
 
 @dataclass
 class Stock:
-    """Normalize yfinance company data into valuation-ready metrics."""
+    """Normalize yfinance company data into valuation-ready metrics.
+
+    Parameters
+    ----------
+    ticker:
+        Yahoo Finance ticker symbol.
+    yfinance_client:
+        Optional ticker-bound client. When omitted, one is created from ``ticker``.
+    tax_rate_provider:
+        Optional provider for country-level corporate tax rates.
+    tax_rate:
+        Optional explicit tax-rate override.
+    """
 
     ticker: str
     yfinance_client: YFinanceClient | None = None
@@ -62,7 +115,13 @@ class Stock:
             self.yfinance_client = YFinanceClient(self.ticker)
 
     def company_name(self) -> str:
-        """Return the best available company display name."""
+        """Return the best available company display name.
+
+        Returns
+        -------
+        str
+            yfinance long name, short name, or normalized ticker fallback.
+        """
 
         info = self.raw_info()
         name = _first_present(info, ("longName", "shortName"))
@@ -72,7 +131,18 @@ class Stock:
         return str(name)
 
     def headquarters_country(self) -> str:
-        """Return the company headquarters country from yfinance metadata."""
+        """Return the company headquarters country from yfinance metadata.
+
+        Returns
+        -------
+        str
+            Company headquarters country.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If yfinance metadata does not expose a country.
+        """
 
         country = _first_present(self.raw_info(), ("country",))
         if country is None or not str(country).strip():
@@ -80,7 +150,13 @@ class Stock:
         return str(country).strip()
 
     def valuation_currency(self) -> str:
-        """Return the currency used by the company's financial statements."""
+        """Return the currency used by the company's financial statements.
+
+        Returns
+        -------
+        str
+            Normalized valuation currency code.
+        """
 
         currency = _first_present(self.raw_info(), ("financialCurrency",))
         if currency is None:
@@ -88,7 +164,13 @@ class Stock:
         return self._normalize_currency(currency, "valuation currency")
 
     def trading_currency(self) -> str:
-        """Return the currency used for market prices."""
+        """Return the currency used for market prices.
+
+        Returns
+        -------
+        str
+            Normalized trading currency code.
+        """
 
         currency = _first_present(self.raw_fast_info(), ("currency",))
         if currency is None:
@@ -103,7 +185,13 @@ class Stock:
         return trading_currency
 
     def current_price(self) -> Decimal:
-        """Return the latest stock price in the trading currency."""
+        """Return the latest stock price in the trading currency.
+
+        Returns
+        -------
+        Decimal
+            Latest available stock price.
+        """
 
         price = self._first_decimal(
             self.raw_fast_info(),
@@ -124,7 +212,13 @@ class Stock:
         raise self._metric_error("current price", "fast_info.last_price")
 
     def market_cap(self) -> Decimal | None:
-        """Return market capitalization when available."""
+        """Return market capitalization when available.
+
+        Returns
+        -------
+        Decimal | None
+            Market capitalization, or ``None`` when unavailable.
+        """
 
         market_cap = self._first_decimal(self.raw_fast_info(), ("market_cap", "marketCap"))
         if market_cap is not None:
@@ -135,7 +229,13 @@ class Stock:
         return market_cap
 
     def beta(self) -> Decimal | None:
-        """Return the company's equity beta when available."""
+        """Return the company's equity beta when available.
+
+        Returns
+        -------
+        Decimal | None
+            Equity beta, or ``None`` when unavailable.
+        """
 
         beta = self._first_decimal(self.raw_info(), ("beta",))
         if beta is None:
@@ -143,7 +243,13 @@ class Stock:
         return beta
 
     def shares_outstanding(self) -> Decimal:
-        """Return the latest shares outstanding count."""
+        """Return the latest shares outstanding count.
+
+        Returns
+        -------
+        Decimal
+            Latest shares outstanding count.
+        """
 
         shares = self._first_decimal(self.raw_fast_info(), ("shares", "sharesOutstanding"))
         if shares is not None:
@@ -161,33 +267,68 @@ class Stock:
         raise self._metric_error("shares outstanding", "yfinance.Ticker.get_shares_full")
 
     def annual_income_statement(self) -> "pd.DataFrame":
-        """Return the cached annual income statement."""
+        """Return the cached annual income statement.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Raw annual income statement from ``YFinanceClient``.
+        """
 
         if self._annual_income_statement is None:
             self._annual_income_statement = self.yfinance_client.get_income_statement(freq="yearly")
         return self._annual_income_statement
 
     def annual_balance_sheet(self) -> "pd.DataFrame":
-        """Return the cached annual balance sheet."""
+        """Return the cached annual balance sheet.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Raw annual balance sheet from ``YFinanceClient``.
+        """
 
         if self._annual_balance_sheet is None:
             self._annual_balance_sheet = self.yfinance_client.get_balance_sheet(freq="yearly")
         return self._annual_balance_sheet
 
     def annual_cashflow(self) -> "pd.DataFrame":
-        """Return the cached annual cash flow statement."""
+        """Return the cached annual cash flow statement.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Raw annual cash flow statement from ``YFinanceClient``.
+        """
 
         if self._annual_cashflow is None:
             self._annual_cashflow = self.yfinance_client.get_cashflow(freq="yearly")
         return self._annual_cashflow
 
     def revenue_series(self) -> "pd.Series":
-        """Return annual revenue as a chronological series."""
+        """Return annual revenue as a chronological series.
+
+        Returns
+        -------
+        pandas.Series
+            Annual revenue values ordered from oldest to newest.
+        """
 
         return self._statement_series(self.annual_income_statement(), ("Total Revenue", "Operating Revenue"), "revenue")
 
     def ebit_series(self) -> "pd.Series":
-        """Return annual EBIT as a chronological series."""
+        """Return annual EBIT as a chronological series.
+
+        Returns
+        -------
+        pandas.Series
+            Annual EBIT values ordered from oldest to newest.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If no EBIT row or derivation proxy exists.
+        """
 
         try:
             return self._statement_series(self.annual_income_statement(), ("EBIT", "Operating Income"), "EBIT")
@@ -204,7 +345,13 @@ class Stock:
             return revenue - operating_expenses
 
     def interest_expense_series(self) -> "pd.Series":
-        """Return annual interest expense as positive values."""
+        """Return annual interest expense as positive values.
+
+        Returns
+        -------
+        pandas.Series
+            Annual interest expense values ordered from oldest to newest.
+        """
 
         return self._statement_series(
             self.annual_income_statement(),
@@ -214,7 +361,13 @@ class Stock:
         )
 
     def depreciation_series(self) -> "pd.Series":
-        """Return annual depreciation and amortization as positive values."""
+        """Return annual depreciation and amortization as positive values.
+
+        Returns
+        -------
+        pandas.Series
+            Annual depreciation and amortization ordered from oldest to newest.
+        """
 
         return self._statement_series(
             self.annual_cashflow(),
@@ -229,7 +382,13 @@ class Stock:
         )
 
     def capex_series(self) -> "pd.Series":
-        """Return annual capital expenditures as positive outflows."""
+        """Return annual capital expenditures as positive outflows.
+
+        Returns
+        -------
+        pandas.Series
+            Annual capital expenditures ordered from oldest to newest.
+        """
 
         return self._statement_series(
             self.annual_cashflow(),
@@ -239,7 +398,13 @@ class Stock:
         )
 
     def change_in_non_cash_working_capital_series(self) -> "pd.Series":
-        """Return annual non-cash working-capital increases as positive outflows."""
+        """Return annual non-cash working-capital increases as positive outflows.
+
+        Returns
+        -------
+        pandas.Series
+            Annual changes in non-cash working capital ordered from oldest to newest.
+        """
 
         try:
             working_capital = self._statement_series(
@@ -272,7 +437,13 @@ class Stock:
             return non_cash_working_capital.diff().dropna()
 
     def debt_series(self) -> "pd.Series":
-        """Return annual total debt as positive values."""
+        """Return annual total debt as positive values.
+
+        Returns
+        -------
+        pandas.Series
+            Annual total debt ordered from oldest to newest.
+        """
 
         try:
             return self._statement_series(self.annual_balance_sheet(), ("Total Debt",), "total debt", absolute=True)
@@ -293,7 +464,13 @@ class Stock:
             return debt.abs()
 
     def cash_series(self) -> "pd.Series":
-        """Return annual cash and equivalents as positive values."""
+        """Return annual cash and equivalents as positive values.
+
+        Returns
+        -------
+        pandas.Series
+            Annual cash and equivalent balances ordered from oldest to newest.
+        """
 
         return self._statement_series(
             self.annual_balance_sheet(),
@@ -303,7 +480,18 @@ class Stock:
         )
 
     def latest_fcff_inputs(self) -> FcffInputs:
-        """Return the latest common-period FCFF input bundle."""
+        """Return the latest common-period FCFF input bundle.
+
+        Returns
+        -------
+        FcffInputs
+            Latest aligned normalized inputs needed by FCFF calculation.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If annual input series do not share a common period.
+        """
 
         ebit, depreciation = _align_pair(
             self.ebit_series(), self.depreciation_series(), "FCFF inputs", self.normalized_ticker()
@@ -320,6 +508,7 @@ class Stock:
         if common_periods.empty:
             raise self._metric_error("FCFF inputs", "common annual statement periods")
         period = common_periods[-1]
+        self._record_diagnostic_once(f"FCFF inputs resolved from annual statement period {period}.")
         return FcffInputs(
             period=period,
             ebit=ebit.loc[period],
@@ -330,7 +519,13 @@ class Stock:
         )
 
     def invested_capital_series(self) -> "pd.Series":
-        """Return annual invested capital."""
+        """Return annual invested capital.
+
+        Returns
+        -------
+        pandas.Series
+            Annual invested capital ordered from oldest to newest.
+        """
 
         try:
             return self._statement_series(
@@ -352,7 +547,13 @@ class Stock:
             return debt + equity - cash
 
     def return_on_capital_series(self) -> "pd.Series":
-        """Return annual return on capital using prior-period invested capital."""
+        """Return annual return on capital using prior-period invested capital.
+
+        Returns
+        -------
+        pandas.Series
+            Annual return on capital ordered from oldest to newest.
+        """
 
         nopat = self.ebit_series() * (Decimal("1") - self._tax_rate_for_valuation())
         invested_capital = self.invested_capital_series().shift(1)
@@ -366,7 +567,13 @@ class Stock:
         return nopat / valid
 
     def reinvestment_rate_series(self) -> "pd.Series":
-        """Return annual reinvestment rate."""
+        """Return annual reinvestment rate.
+
+        Returns
+        -------
+        pandas.Series
+            Annual reinvestment rate ordered from oldest to newest.
+        """
 
         capex, depreciation = _align_pair(
             self.capex_series(), self.depreciation_series(), "reinvestment rate", self.normalized_ticker()
@@ -384,21 +591,39 @@ class Stock:
         return reinvestment / valid
 
     def raw_info(self) -> dict[str, Any]:
-        """Return cached yfinance info metadata."""
+        """Return cached yfinance info metadata.
+
+        Returns
+        -------
+        dict[str, Any]
+            Raw yfinance info metadata.
+        """
 
         if self._info is None:
             self._info = self.yfinance_client.get_info()
         return self._info
 
     def raw_fast_info(self) -> Mapping[str, Any]:
-        """Return cached yfinance fast-info metadata."""
+        """Return cached yfinance fast-info metadata.
+
+        Returns
+        -------
+        Mapping[str, Any]
+            Raw yfinance fast-info metadata.
+        """
 
         if self._fast_info is None:
             self._fast_info = self.yfinance_client.get_fast_info()
         return self._fast_info
 
     def normalized_ticker(self) -> str:
-        """Return the normalized ticker symbol."""
+        """Return the normalized ticker symbol.
+
+        Returns
+        -------
+        str
+            Normalized ticker symbol from the client.
+        """
 
         return self.yfinance_client.normalized_ticker()
 
@@ -434,11 +659,15 @@ class Stock:
 
     def _tax_rate_for_valuation(self) -> Decimal:
         if self.tax_rate is not None:
+            self._record_diagnostic_once("Tax rate resolved from explicit override.")
             return self.tax_rate
         if self.tax_rate_provider is None:
-            self.diagnostics.append("Tax rate provider unavailable; using 0 for stock-level normalized rates.")
+            self._record_diagnostic_once("Tax rate provider unavailable; using 0 for stock-level normalized rates.")
             return Decimal("0")
-        return self.tax_rate_provider.get_corporate_tax_rate(self.headquarters_country(), date.today())
+        valuation_date = date.today()
+        country = self.headquarters_country()
+        self._record_diagnostic_once(f"Tax rate resolved from provider for {country} on {valuation_date}.")
+        return self.tax_rate_provider.get_corporate_tax_rate(country, valuation_date)
 
     def _first_decimal(self, source: Mapping[str, Any], keys: Sequence[str]) -> Decimal | None:
         value = _first_present(source, keys)
@@ -472,6 +701,10 @@ class Stock:
             metric_name,
             source_attempted=source_attempted,
         )
+
+    def _record_diagnostic_once(self, message: str) -> None:
+        if message not in self.diagnostics:
+            self.diagnostics.append(message)
 
 
 def _first_present(source: Mapping[str, Any], keys: Sequence[str]) -> Any | None:

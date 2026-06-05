@@ -281,6 +281,40 @@ def test_ebit_can_be_derived_from_revenue_and_operating_expense() -> None:
     assert stock.ebit_series().tolist() == [Decimal("120"), Decimal("150")]
 
 
+def test_ebit_can_use_operating_income_fallback() -> None:
+    """Operating income should be used when the EBIT row is unavailable."""
+
+    income_statement = pd.DataFrame(
+        {
+            pd.Timestamp("2024-12-31"): [400, 120],
+            pd.Timestamp("2025-12-31"): [450, 150],
+        },
+        index=["Total Revenue", "Operating Income"],
+    )
+
+    stock = Stock("AAPL", yfinance_client=FakeYFinanceClient(income_statement=income_statement))
+
+    assert stock.ebit_series().tolist() == [Decimal("120"), Decimal("150")]
+
+
+def test_missing_ebit_proxy_raises_typed_error() -> None:
+    """Missing EBIT rows and derivation proxies should fail with a metric error."""
+
+    income_statement = pd.DataFrame(
+        {
+            pd.Timestamp("2024-12-31"): [400],
+            pd.Timestamp("2025-12-31"): [450],
+        },
+        index=["Total Revenue"],
+    )
+    stock = Stock("AAPL", yfinance_client=FakeYFinanceClient(income_statement=income_statement))
+
+    with pytest.raises(MetricUnavailableError) as error:
+        stock.ebit_series()
+
+    assert error.value.symbol == "AAPL"
+
+
 def test_working_capital_can_be_derived_from_balance_sheet_rows() -> None:
     """Working-capital changes should fall back to balance-sheet derivation."""
 
@@ -314,6 +348,50 @@ def test_latest_fcff_inputs_use_tax_provider_and_latest_common_period() -> None:
     assert inputs.capex == Decimal("24")
     assert inputs.change_in_non_cash_working_capital == Decimal("5")
     assert provider.calls[0][0] == "United States"
+    assert any(
+        message.startswith("FCFF inputs resolved from annual statement period 2025-12-31")
+        for message in stock.diagnostics
+    )
+    assert any(
+        message.startswith("Tax rate resolved from provider for United States on ")
+        for message in stock.diagnostics
+    )
+
+
+def test_latest_fcff_inputs_use_tax_override() -> None:
+    """An explicit tax-rate override should be used instead of the provider."""
+
+    provider = FakeTaxRateProvider(Decimal("0.21"), [])
+    stock = Stock(
+        "AAPL",
+        yfinance_client=FakeYFinanceClient(),
+        tax_rate_provider=provider,
+        tax_rate=Decimal("0.19"),
+    )
+
+    inputs = stock.latest_fcff_inputs()
+
+    assert inputs.tax_rate == Decimal("0.19")
+    assert provider.calls == []
+    assert "Tax rate resolved from explicit override." in stock.diagnostics
+
+
+def test_latest_fcff_inputs_requires_common_metric_period() -> None:
+    """FCFF inputs should fail when normalized series have no common period."""
+
+    cashflow = pd.DataFrame(
+        {
+            pd.Timestamp("2021-12-31"): [10, -20, -3],
+            pd.Timestamp("2022-12-31"): [11, -22, -4],
+        },
+        index=["Depreciation And Amortization", "Capital Expenditure", "Change In Working Capital"],
+    )
+    stock = Stock("AAPL", yfinance_client=FakeYFinanceClient(cashflow=cashflow))
+
+    with pytest.raises(MetricUnavailableError) as error:
+        stock.latest_fcff_inputs()
+
+    assert error.value.metric_name == "FCFF inputs"
 
 
 def test_invested_capital_return_on_capital_and_reinvestment_rates() -> None:
