@@ -8,6 +8,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Protocol
 
+from stock_valuation.contracts import FcffInputs
 from stock_valuation.errors import MetricUnavailableError
 from stock_valuation.yfinance_client import YFinanceClient
 
@@ -39,46 +40,6 @@ class TaxRateProvider(Protocol):
         Decimal
             Corporate tax rate as a decimal fraction.
         """
-
-
-@dataclass(frozen=True)
-class FcffInputs:
-    """Latest normalized inputs needed to calculate free cash flow to the firm.
-
-    Attributes
-    ----------
-    period:
-        Statement period shared by all normalized input series.
-    ebit:
-        Earnings before interest and taxes.
-    tax_rate:
-        Corporate tax rate as a decimal fraction.
-    depreciation_amortization:
-        Depreciation and amortization add-back.
-    capex:
-        Capital expenditures as a positive outflow.
-    change_in_non_cash_working_capital:
-        Increase in non-cash working capital as a positive outflow.
-    """
-
-    period: Any
-    ebit: Decimal
-    tax_rate: Decimal
-    depreciation_amortization: Decimal
-    capex: Decimal
-    change_in_non_cash_working_capital: Decimal
-
-    @property
-    def nopat(self) -> Decimal:
-        """Return EBIT after tax.
-
-        Returns
-        -------
-        Decimal
-            Net operating profit after tax.
-        """
-
-        return self.ebit * (Decimal("1") - self.tax_rate)
 
 
 @dataclass
