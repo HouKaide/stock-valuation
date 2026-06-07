@@ -74,15 +74,23 @@ def test_valuation_assumptions_validate_boundaries() -> None:
     with pytest.raises(InvalidAssumptionsError) as forecast_error:
         ValuationAssumptions(valuation_date=date(2026, 1, 31), forecast_years=0)
 
+    with pytest.raises(InvalidAssumptionsError) as forecast_type_error:
+        ValuationAssumptions(valuation_date=date(2026, 1, 31), forecast_years=True)
+
     with pytest.raises(InvalidAssumptionsError) as rate_error:
         ValuationAssumptions(valuation_date=date(2026, 1, 31), tax_rate_override=Decimal("21"))
 
     with pytest.raises(InvalidAssumptionsError) as finite_error:
         ValuationAssumptions(valuation_date=date(2026, 1, 31), beta_override=Decimal("NaN"))
 
+    with pytest.raises(InvalidAssumptionsError) as decimal_type_error:
+        ValuationAssumptions(valuation_date=date(2026, 1, 31), beta_override=1.1)  # type: ignore[arg-type]
+
     assert forecast_error.value.field_name == "forecast_years"
+    assert forecast_type_error.value.field_name == "forecast_years"
     assert rate_error.value.field_name == "tax_rate_override"
     assert finite_error.value.field_name == "beta_override"
+    assert decimal_type_error.value.field_name == "beta_override"
 
 
 def test_diagnostic_covers_source_fallback_provider_override_and_failure() -> None:

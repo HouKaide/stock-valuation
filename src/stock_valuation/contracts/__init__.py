@@ -99,6 +99,12 @@ class ValuationAssumptions:
     def __post_init__(self) -> None:
         """Validate assumption boundaries."""
 
+        if isinstance(self.forecast_years, bool) or not isinstance(self.forecast_years, int):
+            raise InvalidAssumptionsError(
+                "forecast_years",
+                "Forecast years must be an integer.",
+                suggested_override="Provide a positive integer forecast horizon.",
+            )
         if self.forecast_years <= 0:
             raise InvalidAssumptionsError(
                 "forecast_years",
@@ -174,7 +180,21 @@ class FcffInputs:
 
 @dataclass(frozen=True)
 class FcffResult:
-    """FCFF calculation result with enough detail to reproduce the formula."""
+    """FCFF calculation result with enough detail to reproduce the formula.
+
+    Attributes
+    ----------
+    inputs:
+        Normalized inputs used by the FCFF calculation.
+    nopat:
+        Net operating profit after tax.
+    fcff:
+        Free cash flow to the firm.
+    calculation_steps:
+        Human-readable calculation steps.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     inputs: FcffInputs
     nopat: Decimal
@@ -185,7 +205,21 @@ class FcffResult:
 
 @dataclass(frozen=True)
 class GrowthRegressionResult:
-    """Revenue-growth regression result."""
+    """Revenue-growth regression result.
+
+    Attributes
+    ----------
+    slope:
+        Regression slope.
+    intercept:
+        Regression intercept.
+    sample_size:
+        Number of historical observations used.
+    predicted_next_year_growth:
+        Predicted next-year revenue growth rate.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     slope: Decimal
     intercept: Decimal
@@ -196,7 +230,21 @@ class GrowthRegressionResult:
 
 @dataclass(frozen=True)
 class EstimatedGrowthResult:
-    """Estimated-growth result from reinvestment rate and return on capital."""
+    """Estimated-growth result from reinvestment rate and return on capital.
+
+    Attributes
+    ----------
+    reinvestment_rate:
+        Reinvestment rate as a decimal.
+    return_on_capital:
+        Return on capital as a decimal.
+    estimated_growth:
+        Estimated growth rate as a decimal.
+    source_method:
+        Method used to calculate estimated growth.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     reinvestment_rate: Decimal
     return_on_capital: Decimal
@@ -207,7 +255,23 @@ class EstimatedGrowthResult:
 
 @dataclass(frozen=True)
 class CostOfEquityResult:
-    """Cost-of-equity calculation result."""
+    """Cost-of-equity calculation result.
+
+    Attributes
+    ----------
+    risk_free_rate:
+        Risk-free rate as a decimal.
+    beta:
+        Equity beta.
+    equity_risk_premium:
+        Equity risk premium as a decimal.
+    cost_of_equity:
+        Calculated cost of equity as a decimal.
+    source_details:
+        Sources used for the calculation inputs.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     risk_free_rate: Decimal
     beta: Decimal
@@ -219,7 +283,23 @@ class CostOfEquityResult:
 
 @dataclass(frozen=True)
 class CostOfDebtResult:
-    """Cost-of-debt calculation result."""
+    """Cost-of-debt calculation result.
+
+    Attributes
+    ----------
+    interest_expense:
+        Positive interest expense used in the calculation.
+    average_debt:
+        Average debt denominator.
+    pretax_cost_of_debt:
+        Pre-tax cost of debt as a decimal.
+    tax_rate:
+        Corporate tax rate as a decimal.
+    after_tax_cost_of_debt:
+        After-tax cost of debt as a decimal.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     interest_expense: Decimal
     average_debt: Decimal
@@ -231,7 +311,31 @@ class CostOfDebtResult:
 
 @dataclass(frozen=True)
 class WaccResult:
-    """Weighted average cost of capital calculation result."""
+    """Weighted average cost of capital calculation result.
+
+    Attributes
+    ----------
+    market_value_of_equity:
+        Market value of equity.
+    market_value_of_debt:
+        Market value of debt.
+    equity_weight:
+        Equity capital weight as a decimal.
+    debt_weight:
+        Debt capital weight as a decimal.
+    cost_of_equity:
+        Cost of equity as a decimal.
+    pretax_cost_of_debt:
+        Pre-tax cost of debt as a decimal.
+    tax_rate:
+        Corporate tax rate as a decimal.
+    wacc:
+        Weighted average cost of capital as a decimal.
+    calculation_steps:
+        Human-readable calculation steps.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     market_value_of_equity: Decimal
     market_value_of_debt: Decimal
@@ -247,7 +351,23 @@ class WaccResult:
 
 @dataclass(frozen=True)
 class TerminalGrowthResult:
-    """Terminal-growth source selection result."""
+    """Terminal-growth source selection result.
+
+    Attributes
+    ----------
+    selected_instrument:
+        Selected sovereign-yield instrument.
+    yield_value:
+        Selected yield as a decimal.
+    valuation_date:
+        Date used for yield resolution.
+    provider:
+        Provider that supplied the selected yield.
+    fallbacks_attempted:
+        Fallback instruments or providers attempted.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     selected_instrument: str
     yield_value: Decimal
@@ -259,7 +379,25 @@ class TerminalGrowthResult:
 
 @dataclass(frozen=True)
 class TerminalValueResult:
-    """Terminal-value calculation result."""
+    """Terminal-value calculation result.
+
+    Attributes
+    ----------
+    final_forecast_year_fcff:
+        FCFF from the final explicit forecast year.
+    terminal_growth_rate:
+        Perpetual growth rate as a decimal.
+    next_year_fcff:
+        Final forecast-year FCFF grown by the terminal growth rate.
+    terminal_value:
+        Undiscounted terminal value.
+    present_value_terminal_value:
+        Terminal value discounted to the valuation date.
+    calculation_steps:
+        Human-readable calculation steps.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     final_forecast_year_fcff: Decimal
     terminal_growth_rate: Decimal
@@ -272,7 +410,21 @@ class TerminalValueResult:
 
 @dataclass(frozen=True)
 class DiscountResult:
-    """Discounted forecast cash-flow result."""
+    """Discounted forecast cash-flow result.
+
+    Attributes
+    ----------
+    discount_table:
+        Table of forecast cash flows, discount factors, and present values.
+    present_value_forecast_fcffs:
+        Sum of discounted forecast FCFF values.
+    present_value_terminal_value:
+        Discounted terminal value.
+    enterprise_value:
+        Sum of forecast and terminal present values.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     discount_table: pd.DataFrame
     present_value_forecast_fcffs: Decimal
@@ -283,7 +435,25 @@ class DiscountResult:
 
 @dataclass(frozen=True)
 class EquityBridgeResult:
-    """Equity bridge from enterprise value to equity value."""
+    """Equity bridge from enterprise value to equity value.
+
+    Attributes
+    ----------
+    enterprise_value:
+        Enterprise value before bridge adjustments.
+    debt:
+        Debt deducted from enterprise value.
+    cash:
+        Cash added to enterprise value.
+    non_operating_assets:
+        Non-operating assets added to enterprise value.
+    minority_interest:
+        Minority interest deducted from enterprise value.
+    equity_value:
+        Equity value after bridge adjustments.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     enterprise_value: Decimal
     debt: Decimal
@@ -296,7 +466,45 @@ class EquityBridgeResult:
 
 @dataclass(frozen=True)
 class ValuationResult:
-    """Complete structured output for a valuation run."""
+    """Complete structured output for a valuation run.
+
+    Attributes
+    ----------
+    ticker:
+        Valued ticker symbol.
+    valuation_date:
+        Date of the valuation.
+    valuation_currency:
+        Currency used for valuation outputs.
+    forecast_table:
+        Explicit forecast-period data.
+    fcff:
+        FCFF calculation result.
+    growth:
+        Estimated-growth result.
+    cost_of_equity:
+        Cost-of-equity result.
+    cost_of_debt:
+        Cost-of-debt result.
+    wacc:
+        Weighted average cost of capital result.
+    terminal_value:
+        Terminal-value result.
+    discounting:
+        Discounted cash-flow result.
+    enterprise_value:
+        Calculated enterprise value.
+    equity_value:
+        Calculated equity value.
+    intrinsic_value_per_share:
+        Calculated intrinsic value per share.
+    current_price:
+        Current market price when available.
+    upside_downside_pct:
+        Upside or downside to current price as a decimal.
+    diagnostics:
+        Source, fallback, override, and failure diagnostics.
+    """
 
     ticker: str
     valuation_date: date
@@ -349,6 +557,12 @@ def to_json_safe(value: Any) -> Any:
 
 
 def _validate_finite_decimal(field_name: str, value: Decimal) -> None:
+    if not isinstance(value, Decimal):
+        raise InvalidAssumptionsError(
+            field_name,
+            "Numeric overrides must use Decimal values.",
+            suggested_override="Provide the override as Decimal.",
+        )
     if not value.is_finite():
         raise InvalidAssumptionsError(
             field_name,
