@@ -2,4 +2,4 @@
 
 
 class StockValuationError(Exception):
-    """Base exception for all application-specific failures."""
+    """Base exception for application-specific failures."""

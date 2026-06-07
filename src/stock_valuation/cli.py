@@ -2,10 +2,12 @@
 
 
 def main() -> int:
-    """Run the CLI shell.
+    """Run the command-line interface.
 
-    Returns:
-        Zero to indicate successful execution.
+    Returns
+    -------
+    int
+        Process exit code.
     """
 
     return 0
