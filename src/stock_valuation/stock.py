@@ -2,14 +2,35 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
 
 from stock_valuation.contracts import FcffInputs
 from stock_valuation.errors import MetricUnavailableError
+from stock_valuation.mapping import (
+    SourceMetadata,
+    align_series,
+    map_beta,
+    map_capex_series,
+    map_cash_series,
+    map_company_name,
+    map_current_price,
+    map_debt_series,
+    map_depreciation_series,
+    map_ebit_series,
+    map_headquarters_country,
+    map_interest_expense_series,
+    map_invested_capital_series,
+    map_market_cap,
+    map_revenue_series,
+    map_shares_outstanding,
+    map_trading_currency,
+    map_valuation_currency,
+    map_working_capital_change_series,
+)
 from stock_valuation.yfinance_client import YFinanceClient
 
 if TYPE_CHECKING:
@@ -63,6 +84,7 @@ class Stock:
     tax_rate_provider: TaxRateProvider | None = None
     tax_rate: Decimal | None = None
     diagnostics: list[str] = field(default_factory=list, init=False)
+    mapping_metadata: list[SourceMetadata] = field(default_factory=list, init=False)
     _info: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _fast_info: Mapping[str, Any] | None = field(default=None, init=False, repr=False)
     _annual_income_statement: pd.DataFrame | None = field(default=None, init=False, repr=False)
@@ -84,12 +106,10 @@ class Stock:
             yfinance long name, short name, or normalized ticker fallback.
         """
 
-        info = self.raw_info()
-        name = _first_present(info, ("longName", "shortName"))
-        if name is None:
+        name = map_company_name(self.raw_info(), self.normalized_ticker(), metadata=self.mapping_metadata)
+        if self.mapping_metadata[-1].selected_source == "ticker":
             self.diagnostics.append("Company name unavailable; using ticker symbol.")
-            return self.normalized_ticker()
-        return str(name)
+        return name
 
     def headquarters_country(self) -> str:
         """Return the company headquarters country from yfinance metadata.
@@ -105,10 +125,11 @@ class Stock:
             If yfinance metadata does not expose a country.
         """
 
-        country = _first_present(self.raw_info(), ("country",))
-        if country is None or not str(country).strip():
-            raise self._metric_error("headquarters country", "yfinance.Ticker.get_info.country")
-        return str(country).strip()
+        return map_headquarters_country(
+            self.raw_info(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
 
     def valuation_currency(self) -> str:
         """Return the currency used by the company's financial statements.
@@ -119,10 +140,11 @@ class Stock:
             Normalized valuation currency code.
         """
 
-        currency = _first_present(self.raw_info(), ("financialCurrency",))
-        if currency is None:
-            currency = _first_present(self.raw_fast_info(), ("currency",))
-        return self._normalize_currency(currency, "valuation currency")
+        return map_valuation_currency(
+            self.raw_info(),
+            self.raw_fast_info(),
+            metadata=self.mapping_metadata,
+        )
 
     def trading_currency(self) -> str:
         """Return the currency used for market prices.
@@ -133,11 +155,11 @@ class Stock:
             Normalized trading currency code.
         """
 
-        currency = _first_present(self.raw_fast_info(), ("currency",))
-        if currency is None:
-            currency = _first_present(self.raw_info(), ("currency",))
-
-        trading_currency = self._normalize_currency(currency, "trading currency")
+        trading_currency = map_trading_currency(
+            self.raw_fast_info(),
+            self.raw_info(),
+            metadata=self.mapping_metadata,
+        )
         valuation_currency = self.valuation_currency()
         if trading_currency != valuation_currency:
             self.diagnostics.append(
@@ -154,23 +176,25 @@ class Stock:
             Latest available stock price.
         """
 
-        price = self._first_decimal(
-            self.raw_fast_info(),
-            ("last_price", "lastPrice", "lastPriceRaw", "regularMarketPrice"),
-        )
-        if price is not None:
-            return price
-
-        price = self._first_decimal(self.raw_info(), ("currentPrice", "regularMarketPrice"))
-        if price is not None:
-            return price
-
-        history = self.yfinance_client.get_history(period="5d", interval="1d")
-        close = self._latest_column_value(history, "Close")
-        if close is not None:
+        try:
+            return map_current_price(
+                self.raw_fast_info(),
+                self.raw_info(),
+                None,
+                self.normalized_ticker(),
+                metadata=self.mapping_metadata,
+            )
+        except MetricUnavailableError:
+            history = self.yfinance_client.get_history(period="5d", interval="1d")
+            price = map_current_price(
+                self.raw_fast_info(),
+                self.raw_info(),
+                history,
+                self.normalized_ticker(),
+                metadata=self.mapping_metadata,
+            )
             self.diagnostics.append("Current price resolved from latest historical close.")
-            return close
-        raise self._metric_error("current price", "fast_info.last_price")
+            return price
 
     def market_cap(self) -> Decimal | None:
         """Return market capitalization when available.
@@ -181,10 +205,12 @@ class Stock:
             Market capitalization, or ``None`` when unavailable.
         """
 
-        market_cap = self._first_decimal(self.raw_fast_info(), ("market_cap", "marketCap"))
-        if market_cap is not None:
-            return market_cap
-        market_cap = self._first_decimal(self.raw_info(), ("marketCap",))
+        market_cap = map_market_cap(
+            self.raw_fast_info(),
+            self.raw_info(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
         if market_cap is None:
             self.diagnostics.append("Market capitalization unavailable.")
         return market_cap
@@ -198,7 +224,11 @@ class Stock:
             Equity beta, or ``None`` when unavailable.
         """
 
-        beta = self._first_decimal(self.raw_info(), ("beta",))
+        beta = map_beta(
+            self.raw_info(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
         if beta is None:
             self.diagnostics.append("Beta unavailable.")
         return beta
@@ -212,20 +242,22 @@ class Stock:
             Latest shares outstanding count.
         """
 
-        shares = self._first_decimal(self.raw_fast_info(), ("shares", "sharesOutstanding"))
-        if shares is not None:
-            return shares
-
-        shares = self._first_decimal(self.raw_info(), ("sharesOutstanding", "impliedSharesOutstanding"))
-        if shares is not None:
-            return shares
-
-        shares_history = self.yfinance_client.get_shares_full()
-        if shares_history is not None:
-            shares_history = shares_history.dropna()
-            if not shares_history.empty:
-                return _to_decimal(shares_history.iloc[-1])
-        raise self._metric_error("shares outstanding", "yfinance.Ticker.get_shares_full")
+        try:
+            return map_shares_outstanding(
+                self.raw_fast_info(),
+                self.raw_info(),
+                None,
+                self.normalized_ticker(),
+                metadata=self.mapping_metadata,
+            )
+        except MetricUnavailableError:
+            return map_shares_outstanding(
+                self.raw_fast_info(),
+                self.raw_info(),
+                self.yfinance_client.get_shares_full(),
+                self.normalized_ticker(),
+                metadata=self.mapping_metadata,
+            )
 
     def annual_income_statement(self) -> "pd.DataFrame":
         """Return the cached annual income statement.
@@ -275,7 +307,11 @@ class Stock:
             Annual revenue values ordered from oldest to newest.
         """
 
-        return self._statement_series(self.annual_income_statement(), ("Total Revenue", "Operating Revenue"), "revenue")
+        return map_revenue_series(
+            self.annual_income_statement(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
 
     def ebit_series(self) -> "pd.Series":
         """Return annual EBIT as a chronological series.
@@ -291,19 +327,11 @@ class Stock:
             If no EBIT row or derivation proxy exists.
         """
 
-        try:
-            return self._statement_series(self.annual_income_statement(), ("EBIT", "Operating Income"), "EBIT")
-        except MetricUnavailableError:
-            revenue = self.revenue_series()
-            operating_expenses = self._statement_series(
-                self.annual_income_statement(),
-                ("Operating Expense", "Total Operating Expenses"),
-                "operating expenses",
-            )
-            revenue, operating_expenses = _align_pair(
-                revenue, operating_expenses, "EBIT derivation", self.normalized_ticker()
-            )
-            return revenue - operating_expenses
+        return map_ebit_series(
+            self.annual_income_statement(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
 
     def interest_expense_series(self) -> "pd.Series":
         """Return annual interest expense as positive values.
@@ -314,11 +342,10 @@ class Stock:
             Annual interest expense values ordered from oldest to newest.
         """
 
-        return self._statement_series(
+        return map_interest_expense_series(
             self.annual_income_statement(),
-            ("Interest Expense", "Interest Expense Non Operating"),
-            "interest expense",
-            absolute=True,
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
         )
 
     def depreciation_series(self) -> "pd.Series":
@@ -330,16 +357,11 @@ class Stock:
             Annual depreciation and amortization ordered from oldest to newest.
         """
 
-        return self._statement_series(
+        return map_depreciation_series(
             self.annual_cashflow(),
-            (
-                "Depreciation And Amortization",
-                "Depreciation Amortization Depletion",
-                "Depreciation",
-                "Reconciled Depreciation",
-            ),
-            "depreciation and amortization",
-            absolute=True,
+            self.normalized_ticker(),
+            income_statement=self.annual_income_statement(),
+            metadata=self.mapping_metadata,
         )
 
     def capex_series(self) -> "pd.Series":
@@ -351,11 +373,10 @@ class Stock:
             Annual capital expenditures ordered from oldest to newest.
         """
 
-        return self._statement_series(
+        return map_capex_series(
             self.annual_cashflow(),
-            ("Capital Expenditure", "Capital Expenditure Reported", "Purchase Of PPE", "Net PPE Purchase And Sale"),
-            "capital expenditure",
-            absolute=True,
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
         )
 
     def change_in_non_cash_working_capital_series(self) -> "pd.Series":
@@ -367,35 +388,12 @@ class Stock:
             Annual changes in non-cash working capital ordered from oldest to newest.
         """
 
-        try:
-            working_capital = self._statement_series(
-                self.annual_cashflow(),
-                ("Change In Working Capital",),
-                "change in non-cash working capital",
-            )
-            return -working_capital
-        except MetricUnavailableError:
-            current_assets = self._statement_series(
-                self.annual_balance_sheet(),
-                ("Current Assets", "Total Current Assets"),
-                "current assets",
-            )
-            cash = self.cash_series()
-            current_liabilities = self._statement_series(
-                self.annual_balance_sheet(),
-                ("Current Liabilities", "Total Current Liabilities"),
-                "current liabilities",
-            )
-            current_debt = self._optional_statement_series(
-                self.annual_balance_sheet(),
-                ("Current Debt", "Current Debt And Capital Lease Obligation"),
-                current_assets.index,
-            )
-            assets, liabilities = _align_pair(
-                current_assets - cash, current_liabilities - current_debt, "working capital", self.normalized_ticker()
-            )
-            non_cash_working_capital = assets - liabilities
-            return non_cash_working_capital.diff().dropna()
+        return map_working_capital_change_series(
+            self.annual_cashflow(),
+            self.annual_balance_sheet(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
 
     def debt_series(self) -> "pd.Series":
         """Return annual total debt as positive values.
@@ -406,23 +404,11 @@ class Stock:
             Annual total debt ordered from oldest to newest.
         """
 
-        try:
-            return self._statement_series(self.annual_balance_sheet(), ("Total Debt",), "total debt", absolute=True)
-        except MetricUnavailableError:
-            long_term_debt = self._optional_statement_series(
-                self.annual_balance_sheet(),
-                ("Long Term Debt", "Long Term Debt And Capital Lease Obligation"),
-                self.annual_balance_sheet().columns,
-            )
-            current_debt = self._optional_statement_series(
-                self.annual_balance_sheet(),
-                ("Current Debt", "Current Debt And Capital Lease Obligation"),
-                self.annual_balance_sheet().columns,
-            )
-            debt = _chronological_series(long_term_debt + current_debt)
-            if debt.empty:
-                raise self._metric_error("total debt", "yfinance balance sheet debt rows")
-            return debt.abs()
+        return map_debt_series(
+            self.annual_balance_sheet(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
 
     def cash_series(self) -> "pd.Series":
         """Return annual cash and equivalents as positive values.
@@ -433,11 +419,10 @@ class Stock:
             Annual cash and equivalent balances ordered from oldest to newest.
         """
 
-        return self._statement_series(
+        return map_cash_series(
             self.annual_balance_sheet(),
-            ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"),
-            "cash and cash equivalents",
-            absolute=True,
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
         )
 
     def latest_fcff_inputs(self) -> FcffInputs:
@@ -454,14 +439,17 @@ class Stock:
             If annual input series do not share a common period.
         """
 
-        ebit, depreciation = _align_pair(
-            self.ebit_series(), self.depreciation_series(), "FCFF inputs", self.normalized_ticker()
+        ebit, depreciation = align_series(
+            self.ebit_series(),
+            self.depreciation_series(),
+            self.normalized_ticker(),
+            "FCFF inputs",
         )
-        capex, working_capital = _align_pair(
+        capex, working_capital = align_series(
             self.capex_series(),
             self.change_in_non_cash_working_capital_series(),
-            "FCFF inputs",
             self.normalized_ticker(),
+            "FCFF inputs",
         )
         common_periods = (
             ebit.index.intersection(depreciation.index).intersection(capex.index).intersection(working_capital.index)
@@ -488,24 +476,11 @@ class Stock:
             Annual invested capital ordered from oldest to newest.
         """
 
-        try:
-            return self._statement_series(
-                self.annual_balance_sheet(),
-                ("Invested Capital",),
-                "invested capital",
-                absolute=True,
-            )
-        except MetricUnavailableError:
-            debt = self.debt_series()
-            equity = self._statement_series(
-                self.annual_balance_sheet(),
-                ("Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"),
-                "book equity",
-            )
-            cash = self.cash_series()
-            debt, equity = _align_pair(debt, equity, "invested capital", self.normalized_ticker())
-            debt, cash = _align_pair(debt, cash, "invested capital", self.normalized_ticker())
-            return debt + equity - cash
+        return map_invested_capital_series(
+            self.annual_balance_sheet(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
 
     def return_on_capital_series(self) -> "pd.Series":
         """Return annual return on capital using prior-period invested capital.
@@ -518,8 +493,11 @@ class Stock:
 
         nopat = self.ebit_series() * (Decimal("1") - self._tax_rate_for_valuation())
         invested_capital = self.invested_capital_series().shift(1)
-        nopat, invested_capital = _align_pair(
-            nopat, invested_capital.dropna(), "return on capital", self.normalized_ticker()
+        nopat, invested_capital = align_series(
+            nopat,
+            invested_capital.dropna(),
+            self.normalized_ticker(),
+            "return on capital",
         )
         valid = invested_capital[invested_capital != Decimal("0")]
         nopat = nopat.loc[valid.index]
@@ -536,14 +514,20 @@ class Stock:
             Annual reinvestment rate ordered from oldest to newest.
         """
 
-        capex, depreciation = _align_pair(
-            self.capex_series(), self.depreciation_series(), "reinvestment rate", self.normalized_ticker()
+        capex, depreciation = align_series(
+            self.capex_series(),
+            self.depreciation_series(),
+            self.normalized_ticker(),
+            "reinvestment rate",
         )
-        capex, working_capital = _align_pair(
-            capex, self.change_in_non_cash_working_capital_series(), "reinvestment rate", self.normalized_ticker()
+        capex, working_capital = align_series(
+            capex,
+            self.change_in_non_cash_working_capital_series(),
+            self.normalized_ticker(),
+            "reinvestment rate",
         )
         nopat = self.ebit_series() * (Decimal("1") - self._tax_rate_for_valuation())
-        capex, nopat = _align_pair(capex, nopat, "reinvestment rate", self.normalized_ticker())
+        capex, nopat = align_series(capex, nopat, self.normalized_ticker(), "reinvestment rate")
         reinvestment = capex - depreciation.loc[capex.index] + working_capital.loc[capex.index]
         valid = nopat[nopat != Decimal("0")]
         reinvestment = reinvestment.loc[valid.index]
@@ -588,36 +572,6 @@ class Stock:
 
         return self.yfinance_client.normalized_ticker()
 
-    def _statement_series(
-        self,
-        statement: "pd.DataFrame",
-        row_names: Sequence[str],
-        metric_name: str,
-        *,
-        absolute: bool = False,
-    ) -> "pd.Series":
-        row = _find_statement_row(statement, row_names)
-        if row is None:
-            raise self._metric_error(metric_name, f"yfinance statement rows {tuple(row_names)}")
-        series = _chronological_series(row)
-        if series.empty:
-            raise self._metric_error(metric_name, f"yfinance statement rows {tuple(row_names)}")
-        return series.abs() if absolute else series
-
-    def _optional_statement_series(
-        self,
-        statement: "pd.DataFrame",
-        row_names: Sequence[str],
-        fallback_index: Iterable[Any],
-    ) -> "pd.Series":
-        import pandas as pd
-
-        row = _find_statement_row(statement, row_names)
-        if row is None:
-            fallback_index = list(fallback_index)
-            return pd.Series([Decimal("0")] * len(fallback_index), index=fallback_index, dtype="object")
-        return _chronological_series(row).abs()
-
     def _tax_rate_for_valuation(self) -> Decimal:
         if self.tax_rate is not None:
             self._record_diagnostic_once("Tax rate resolved from explicit override.")
@@ -630,32 +584,6 @@ class Stock:
         self._record_diagnostic_once(f"Tax rate resolved from provider for {country} on {valuation_date}.")
         return self.tax_rate_provider.get_corporate_tax_rate(country, valuation_date)
 
-    def _first_decimal(self, source: Mapping[str, Any], keys: Sequence[str]) -> Decimal | None:
-        value = _first_present(source, keys)
-        if value is None:
-            return None
-        return _to_decimal(value)
-
-    def _latest_column_value(self, frame: "pd.DataFrame", column: str) -> Decimal | None:
-        if column not in frame:
-            return None
-        values = frame[column].dropna()
-        if values.empty:
-            return None
-        return _to_decimal(values.iloc[-1])
-
-    def _normalize_currency(self, value: Any, metric_name: str) -> str:
-        if value is None or not str(value).strip():
-            raise self._metric_error(metric_name, "yfinance currency metadata")
-        currency = str(value).strip().upper()
-        return {
-            "GBP": "GBP",
-            "GBX": "GBP",
-            "GBPENCE": "GBP",
-            "GBPENNY": "GBP",
-            "GBPEN": "GBP",
-        }.get(currency, currency)
-
     def _metric_error(self, metric_name: str, source_attempted: str) -> MetricUnavailableError:
         return MetricUnavailableError(
             self.normalized_ticker(),
@@ -666,54 +594,3 @@ class Stock:
     def _record_diagnostic_once(self, message: str) -> None:
         if message not in self.diagnostics:
             self.diagnostics.append(message)
-
-
-def _first_present(source: Mapping[str, Any], keys: Sequence[str]) -> Any | None:
-    for key in keys:
-        try:
-            value = source[key]
-        except (KeyError, TypeError):
-            value = getattr(source, key, None)
-        if value is not None:
-            return value
-    return None
-
-
-def _to_decimal(value: Any) -> Decimal:
-    try:
-        if hasattr(value, "item"):
-            value = value.item()
-        if value is None:
-            raise ValueError
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError) as error:
-        raise MetricUnavailableError("unknown", "numeric value", source_attempted="decimal conversion") from error
-
-
-def _find_statement_row(statement: "pd.DataFrame", row_names: Sequence[str]) -> "pd.Series | None":
-    normalized_targets = {_normalize_label(name) for name in row_names}
-    for index_value, row in statement.iterrows():
-        if _normalize_label(str(index_value)) in normalized_targets:
-            return row
-    return None
-
-
-def _chronological_series(series: "pd.Series") -> "pd.Series":
-    converted = series.dropna().map(_to_decimal)
-    return converted.sort_index()
-
-
-def _align_pair(
-    left: "pd.Series",
-    right: "pd.Series",
-    metric_name: str,
-    ticker: str,
-) -> tuple["pd.Series", "pd.Series"]:
-    common_index = left.index.intersection(right.index)
-    if common_index.empty:
-        raise MetricUnavailableError(ticker, metric_name, source_attempted="common annual statement periods")
-    return left.loc[common_index], right.loc[common_index]
-
-
-def _normalize_label(value: str) -> str:
-    return "".join(character for character in value.lower() if character.isalnum())
