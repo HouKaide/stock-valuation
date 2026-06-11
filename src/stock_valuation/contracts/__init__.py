@@ -271,6 +271,8 @@ class CostOfEquityResult:
         Sources used for the calculation inputs.
     diagnostics:
         Source, fallback, override, and failure diagnostics.
+    calculation_steps:
+        Human-readable calculation steps.
     """
 
     risk_free_rate: Decimal
@@ -279,6 +281,7 @@ class CostOfEquityResult:
     cost_of_equity: Decimal
     source_details: tuple[str, ...]
     diagnostics: list[Diagnostic]
+    calculation_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -299,6 +302,10 @@ class CostOfDebtResult:
         After-tax cost of debt as a decimal.
     diagnostics:
         Source, fallback, override, and failure diagnostics.
+    source_periods:
+        Adjacent annual periods used for average debt and interest expense.
+    calculation_steps:
+        Human-readable calculation steps.
     """
 
     interest_expense: Decimal
@@ -307,6 +314,8 @@ class CostOfDebtResult:
     tax_rate: Decimal
     after_tax_cost_of_debt: Decimal
     diagnostics: list[Diagnostic]
+    source_periods: tuple[Any, ...] = ()
+    calculation_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -335,6 +344,10 @@ class WaccResult:
         Human-readable calculation steps.
     diagnostics:
         Source, fallback, override, and failure diagnostics.
+    total_capital:
+        Sum of market debt and market equity.
+    after_tax_cost_of_debt:
+        Cost of debt after applying the corporate tax rate.
     """
 
     market_value_of_equity: Decimal
@@ -347,6 +360,8 @@ class WaccResult:
     wacc: Decimal
     calculation_steps: tuple[str, ...]
     diagnostics: list[Diagnostic]
+    total_capital: Decimal | None = None
+    after_tax_cost_of_debt: Decimal | None = None
 
 
 @dataclass(frozen=True)

@@ -9,12 +9,26 @@ from typing import Any
 import pandas as pd
 
 from stock_valuation.contracts import (
+    CostOfDebtResult,
+    CostOfEquityResult,
     Diagnostic,
     EstimatedGrowthResult,
     FcffResult,
     GrowthRegressionResult,
+    ValuationAssumptions,
+    WaccResult,
 )
-from stock_valuation.errors import InvalidAssumptionsError, MetricUnavailableError
+from stock_valuation.errors import (
+    InvalidAssumptionsError,
+    MetricUnavailableError,
+    ProviderUnavailableError,
+)
+from stock_valuation.providers import (
+    EquityRiskPremiumProvider,
+    MacroRateProvider,
+    MarketDebtProvider,
+    TaxRateProvider,
+)
 from stock_valuation.stock import Stock
 
 
@@ -102,10 +116,25 @@ class DamodaranValuationProcessor:
     ----------
     stock:
         Stock model exposing normalized annual metrics. The processor never
-        calls yfinance or external providers directly.
+        calls yfinance directly.
+    assumptions:
+        Optional valuation assumptions and overrides.
+    macro_provider:
+        Optional provider for government yields.
+    erp_provider:
+        Optional provider for equity risk premiums.
+    tax_rate_provider:
+        Optional provider for corporate tax rates.
+    market_debt_provider:
+        Optional provider for market debt values.
     """
 
     stock: Stock
+    assumptions: ValuationAssumptions | None = None
+    macro_provider: MacroRateProvider | None = None
+    erp_provider: EquityRiskPremiumProvider | None = None
+    tax_rate_provider: TaxRateProvider | None = None
+    market_debt_provider: MarketDebtProvider | None = None
     diagnostics: list[Diagnostic] = field(default_factory=list, init=False)
 
     def calculate_fcff(self) -> FcffResult:
@@ -365,6 +394,536 @@ class DamodaranValuationProcessor:
             diagnostics=[diagnostic],
         )
 
+    def risk_free_rate(self) -> Decimal:
+        """Resolve the valuation-currency risk-free rate.
+
+        Returns
+        -------
+        Decimal
+            Risk-free rate in decimal representation.
+
+        Raises
+        ------
+        ProviderUnavailableError
+            If neither the currency-matched yield nor US 10-year fallback can
+            be resolved.
+        """
+
+        assumptions = self._require_assumptions()
+        if assumptions.risk_free_rate_override is not None:
+            diagnostic = Diagnostic(
+                kind="override",
+                message="Used risk-free-rate override.",
+                ticker=self._ticker(),
+                metric="risk-free rate",
+                source_attempted="ValuationAssumptions.risk_free_rate_override",
+            )
+            self._record_diagnostic(diagnostic)
+            return assumptions.risk_free_rate_override
+        if self.macro_provider is None:
+            raise ProviderUnavailableError(
+                "macro rate provider",
+                "risk-free rate",
+                suggested_override="Provide risk_free_rate_override or configure a macro rate provider.",
+            )
+
+        currency = (
+            assumptions.valuation_currency_override or self.stock.valuation_currency()
+        )
+        country = (
+            assumptions.company_country_override or self.stock.headquarters_country()
+        )
+        provider_name = type(self.macro_provider).__name__
+        try:
+            rate = self.macro_provider.get_long_term_government_yield(
+                currency,
+                country,
+                assumptions.valuation_date,
+            )
+        except ProviderUnavailableError:
+            try:
+                rate = self.macro_provider.get_us_10y_treasury_yield(
+                    assumptions.valuation_date
+                )
+            except ProviderUnavailableError as fallback_error:
+                raise ProviderUnavailableError(
+                    provider_name,
+                    "risk-free rate",
+                    source_attempted="currency-matched government yield",
+                    fallbacks_attempted=("US 10-year Treasury yield",),
+                    suggested_override="Provide risk_free_rate_override.",
+                ) from fallback_error
+            diagnostic = Diagnostic(
+                kind="fallback",
+                message="Used US 10-year Treasury yield after currency-matched yield was unavailable.",
+                ticker=self._ticker(),
+                metric="risk-free rate",
+                provider=provider_name,
+                source_attempted="US 10-year Treasury yield",
+                fallbacks_attempted=("currency-matched government yield",),
+            )
+            self._record_diagnostic(diagnostic)
+            return rate
+        diagnostic = Diagnostic(
+            kind="provider",
+            message=f"Resolved {currency} risk-free rate from macro provider.",
+            ticker=self._ticker(),
+            metric="risk-free rate",
+            provider=provider_name,
+            source_attempted="currency-matched government yield",
+        )
+        self._record_diagnostic(diagnostic)
+        return rate
+
+    def equity_risk_premium(self) -> Decimal:
+        """Resolve the company-country equity risk premium.
+
+        Returns
+        -------
+        Decimal
+            Equity risk premium in decimal representation.
+
+        Raises
+        ------
+        ProviderUnavailableError
+            If no override or ERP provider value is available.
+        """
+
+        assumptions = self._require_assumptions()
+        if assumptions.equity_risk_premium_override is not None:
+            diagnostic = Diagnostic(
+                kind="override",
+                message="Used equity-risk-premium override.",
+                ticker=self._ticker(),
+                metric="equity risk premium",
+                source_attempted="ValuationAssumptions.equity_risk_premium_override",
+            )
+            self._record_diagnostic(diagnostic)
+            return assumptions.equity_risk_premium_override
+        if self.erp_provider is None:
+            raise ProviderUnavailableError(
+                "equity risk premium provider",
+                "equity risk premium",
+                suggested_override="Provide equity_risk_premium_override or configure an ERP provider.",
+            )
+
+        country = (
+            assumptions.company_country_override or self.stock.headquarters_country()
+        )
+        premium = self.erp_provider.get_equity_risk_premium(
+            country,
+            assumptions.valuation_date,
+        )
+        self._record_diagnostic(
+            Diagnostic(
+                kind="provider",
+                message=f"Resolved equity risk premium for {country}.",
+                ticker=self._ticker(),
+                metric="equity risk premium",
+                provider=type(self.erp_provider).__name__,
+                source_attempted="country equity risk premium",
+            )
+        )
+        return premium
+
+    def beta(self) -> Decimal:
+        """Resolve equity beta from an override or normalized stock data.
+
+        Returns
+        -------
+        Decimal
+            Equity beta.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If beta is absent and no override is supplied.
+        """
+
+        assumptions = self._require_assumptions()
+        if assumptions.beta_override is not None:
+            self._record_diagnostic(
+                Diagnostic(
+                    kind="override",
+                    message="Used beta override.",
+                    ticker=self._ticker(),
+                    metric="beta",
+                    source_attempted="ValuationAssumptions.beta_override",
+                )
+            )
+            return assumptions.beta_override
+        beta = self.stock.beta()
+        if beta is None:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "beta",
+                source_attempted="Stock.beta",
+                suggested_override="Provide beta_override.",
+            )
+        self._record_diagnostic(
+            Diagnostic(
+                kind="source",
+                message="Resolved beta from normalized stock metadata.",
+                ticker=self._ticker(),
+                metric="beta",
+                source_attempted="Stock.beta",
+            )
+        )
+        return beta
+
+    def cost_of_equity(self) -> CostOfEquityResult:
+        """Calculate cost of equity using risk-free rate, beta, and ERP.
+
+        Returns
+        -------
+        CostOfEquityResult
+            Cost-of-equity inputs, result, sources, steps, and diagnostics.
+        """
+
+        start = len(self.diagnostics)
+        risk_free_rate = self.risk_free_rate()
+        beta = self.beta()
+        equity_risk_premium = self.equity_risk_premium()
+        cost_of_equity = risk_free_rate + (beta * equity_risk_premium)
+        diagnostics = self.diagnostics[start:]
+        return CostOfEquityResult(
+            risk_free_rate=risk_free_rate,
+            beta=beta,
+            equity_risk_premium=equity_risk_premium,
+            cost_of_equity=cost_of_equity,
+            source_details=tuple(
+                diagnostic.source_attempted or diagnostic.kind
+                for diagnostic in diagnostics
+            ),
+            diagnostics=diagnostics,
+            calculation_steps=(
+                "Cost of Equity = Risk-Free Rate + Beta * Equity Risk Premium",
+            ),
+        )
+
+    def market_value_of_equity(self) -> Decimal:
+        """Return positive market capitalization for WACC weighting.
+
+        Returns
+        -------
+        Decimal
+            Market value of equity.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If market capitalization is missing or non-positive.
+        """
+
+        market_cap = self.stock.market_cap()
+        if market_cap is None or market_cap <= 0:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "market value of equity",
+                source_attempted="Stock.market_cap",
+                suggested_override="Provide a positive market capitalization source.",
+            )
+        self._record_diagnostic(
+            Diagnostic(
+                kind="source",
+                message="Resolved market value of equity from market capitalization.",
+                ticker=self._ticker(),
+                metric="market value of equity",
+                source_attempted="Stock.market_cap",
+            )
+        )
+        return market_cap
+
+    def market_value_of_debt(self) -> Decimal:
+        """Resolve market debt with an override, provider, or book fallback.
+
+        Returns
+        -------
+        Decimal
+            Positive market or book value of debt.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If neither provider nor normalized book debt yields a positive
+            value.
+        """
+
+        assumptions = self._require_assumptions()
+        if assumptions.market_debt_override is not None:
+            debt = assumptions.market_debt_override
+            source_kind = "override"
+            message = "Used market-debt override."
+            source = "ValuationAssumptions.market_debt_override"
+        elif self.market_debt_provider is not None:
+            debt = self.market_debt_provider.get_market_value_of_debt(
+                self._ticker(),
+                assumptions.valuation_date,
+            )
+            if debt is not None:
+                source_kind = "provider"
+                message = "Resolved market value of debt from provider."
+                source = "MarketDebtProvider.get_market_value_of_debt"
+            else:
+                debt = self._latest_book_debt()
+                source_kind = "fallback"
+                message = (
+                    "Market debt provider returned no value; used latest book debt."
+                )
+                source = "Stock.debt_series"
+        else:
+            debt = self._latest_book_debt()
+            source_kind = "fallback"
+            message = "No market debt provider configured; used latest book debt."
+            source = "Stock.debt_series"
+        if debt <= 0:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "market value of debt",
+                source_attempted=source,
+                suggested_override="Provide a positive market_debt_override.",
+            )
+        self._record_diagnostic(
+            Diagnostic(
+                kind=source_kind,
+                message=message,
+                ticker=self._ticker(),
+                metric="market value of debt",
+                provider=(
+                    type(self.market_debt_provider).__name__
+                    if source_kind == "provider"
+                    else None
+                ),
+                source_attempted=source,
+            )
+        )
+        return debt
+
+    def average_debt(self) -> Decimal:
+        """Calculate positive average debt from the latest adjacent periods.
+
+        Returns
+        -------
+        Decimal
+            Average of the latest two annual debt values.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If fewer than two periods exist or average debt is non-positive.
+        """
+
+        average_debt, periods = self._average_debt_details()
+        self._record_diagnostic(
+            Diagnostic(
+                kind="calculation",
+                message=f"Calculated average debt from periods {periods[0]} and {periods[1]}.",
+                ticker=self._ticker(),
+                metric="average debt",
+                source_attempted="Stock.debt_series",
+            )
+        )
+        return average_debt
+
+    def tax_rate(self) -> Decimal:
+        """Resolve the marginal corporate tax rate.
+
+        Returns
+        -------
+        Decimal
+            Corporate tax rate in decimal representation.
+
+        Raises
+        ------
+        ProviderUnavailableError
+            If no override or provider value is available.
+        """
+
+        assumptions = self._require_assumptions()
+        if assumptions.tax_rate_override is not None:
+            self._record_diagnostic(
+                Diagnostic(
+                    kind="override",
+                    message="Used tax-rate override.",
+                    ticker=self._ticker(),
+                    metric="tax rate",
+                    source_attempted="ValuationAssumptions.tax_rate_override",
+                )
+            )
+            return assumptions.tax_rate_override
+        provider = self.tax_rate_provider or getattr(
+            self.stock, "tax_rate_provider", None
+        )
+        if provider is None:
+            raise ProviderUnavailableError(
+                "tax rate provider",
+                "corporate tax rate",
+                suggested_override="Provide tax_rate_override or configure a tax-rate provider.",
+            )
+        country = (
+            assumptions.company_country_override or self.stock.headquarters_country()
+        )
+        tax_rate = provider.get_corporate_tax_rate(
+            country,
+            assumptions.valuation_date,
+        )
+        self._record_diagnostic(
+            Diagnostic(
+                kind="provider",
+                message=f"Resolved corporate tax rate for {country}.",
+                ticker=self._ticker(),
+                metric="tax rate",
+                provider=type(provider).__name__,
+                source_attempted="country corporate tax rate",
+            )
+        )
+        return tax_rate
+
+    def cost_of_debt(self) -> CostOfDebtResult:
+        """Calculate pre-tax and after-tax historical cost of debt.
+
+        Returns
+        -------
+        CostOfDebtResult
+            Interest expense, average debt, tax rate, rates, periods, steps,
+            and diagnostics.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If debt or interest expense cannot be aligned.
+        """
+
+        start = len(self.diagnostics)
+        average_debt, debt_periods = self._average_debt_details()
+        interest = self.stock.interest_expense_series().sort_index()
+        current_period = debt_periods[-1]
+        if current_period not in interest.index:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "interest expense",
+                source_attempted=f"Stock.interest_expense_series at {current_period}",
+            )
+        interest_expense = interest.loc[current_period]
+        if not isinstance(interest_expense, Decimal) or interest_expense <= 0:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "interest expense",
+                source_attempted=f"Stock.interest_expense_series at {current_period}",
+            )
+        tax_rate = self.tax_rate()
+        pretax_cost = interest_expense / average_debt
+        after_tax_cost = pretax_cost * (Decimal("1") - tax_rate)
+        diagnostic = Diagnostic(
+            kind="calculation",
+            message=f"Calculated cost of debt using periods {debt_periods[0]} and {debt_periods[1]}.",
+            ticker=self._ticker(),
+            metric="cost of debt",
+            source_attempted="interest expense / average debt",
+        )
+        self._record_diagnostic(diagnostic)
+        return CostOfDebtResult(
+            interest_expense=interest_expense,
+            average_debt=average_debt,
+            pretax_cost_of_debt=pretax_cost,
+            tax_rate=tax_rate,
+            after_tax_cost_of_debt=after_tax_cost,
+            diagnostics=self.diagnostics[start:],
+            source_periods=debt_periods,
+            calculation_steps=(
+                "Average Debt = (Debt_t + Debt_t-1) / 2",
+                "Cost of Debt = Interest Expense / Average Debt",
+                "After-Tax Cost of Debt = Cost of Debt * (1 - tax_rate)",
+            ),
+        )
+
+    def capital_weights(
+        self,
+        market_value_of_equity: Decimal,
+        market_value_of_debt: Decimal,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        """Calculate total capital and exact equity and debt weights.
+
+        Parameters
+        ----------
+        market_value_of_equity:
+            Market value of equity.
+        market_value_of_debt:
+            Market value of debt.
+
+        Returns
+        -------
+        tuple[Decimal, Decimal, Decimal]
+            Total capital, equity weight, and debt weight.
+
+        Raises
+        ------
+        InvalidAssumptionsError
+            If total capital is zero or negative.
+        """
+
+        total_capital = market_value_of_equity + market_value_of_debt
+        validate_positive_operating_base(
+            "total_capital",
+            total_capital,
+            suggested_override="Provide positive market values of debt and equity.",
+        )
+        return (
+            total_capital,
+            market_value_of_equity / total_capital,
+            market_value_of_debt / total_capital,
+        )
+
+    def wacc(self) -> WaccResult:
+        """Calculate weighted average cost of capital with full breakdown.
+
+        Returns
+        -------
+        WaccResult
+            Capital values, weights, component costs, WACC, steps, and
+            diagnostics.
+        """
+
+        start = len(self.diagnostics)
+        equity_cost = self.cost_of_equity()
+        market_equity = self.market_value_of_equity()
+        market_debt = self.market_value_of_debt()
+        debt_cost = self.cost_of_debt()
+        total_capital, equity_weight, debt_weight = self.capital_weights(
+            market_equity,
+            market_debt,
+        )
+        wacc = (equity_weight * equity_cost.cost_of_equity) + (
+            debt_weight * debt_cost.after_tax_cost_of_debt
+        )
+        diagnostic = Diagnostic(
+            kind="calculation",
+            message="Calculated WACC from market capital weights and component costs.",
+            ticker=self._ticker(),
+            metric="wacc",
+            source_attempted="capital-weighted cost of equity and after-tax debt",
+        )
+        self._record_diagnostic(diagnostic)
+        return WaccResult(
+            market_value_of_equity=market_equity,
+            market_value_of_debt=market_debt,
+            equity_weight=equity_weight,
+            debt_weight=debt_weight,
+            cost_of_equity=equity_cost.cost_of_equity,
+            pretax_cost_of_debt=debt_cost.pretax_cost_of_debt,
+            tax_rate=debt_cost.tax_rate,
+            wacc=wacc,
+            calculation_steps=(
+                "Total Capital = Market Value of Equity + Market Value of Debt",
+                "Equity Weight = E / (D + E)",
+                "Debt Weight = D / (D + E)",
+                "WACC = Equity Weight * Re + Debt Weight * Rd * (1 - T)",
+            ),
+            diagnostics=self.diagnostics[start:],
+            total_capital=total_capital,
+            after_tax_cost_of_debt=debt_cost.after_tax_cost_of_debt,
+        )
+
     def _reinvestment_rate_series(self) -> pd.Series:
         inputs = self.stock.latest_fcff_inputs()
         nopat = calculate_nopat(inputs.ebit, inputs.tax_rate, period=inputs.period)
@@ -402,6 +961,64 @@ class DamodaranValuationProcessor:
             nopat = calculate_nopat(ebit.loc[period], inputs.tax_rate, period=period)
             values.append(nopat / capital)
         return pd.Series(values, index=common_periods, dtype=object)
+
+    def _average_debt_details(self) -> tuple[Decimal, tuple[Any, Any]]:
+        debt = self.stock.debt_series().sort_index()
+        if len(debt) < 2:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "average debt",
+                source_attempted="Stock.debt_series",
+                suggested_override="Provide at least two adjacent annual debt observations.",
+            )
+        periods = (debt.index[-2], debt.index[-1])
+        previous_debt = debt.iloc[-2]
+        current_debt = debt.iloc[-1]
+        if not isinstance(previous_debt, Decimal) or not isinstance(
+            current_debt, Decimal
+        ):
+            raise MetricUnavailableError(
+                self._ticker(),
+                "average debt",
+                source_attempted="Stock.debt_series",
+            )
+        average_debt = (previous_debt + current_debt) / Decimal("2")
+        if not average_debt.is_finite() or average_debt <= 0:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "average debt",
+                source_attempted=f"Stock.debt_series periods {periods[0]} and {periods[1]}",
+                suggested_override="Provide positive adjacent annual debt values.",
+            )
+        return average_debt, periods
+
+    def _latest_book_debt(self) -> Decimal:
+        debt = self.stock.debt_series().sort_index()
+        if debt.empty:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "market value of debt",
+                source_attempted="Stock.debt_series",
+                suggested_override="Provide market_debt_override.",
+            )
+        latest_debt = debt.iloc[-1]
+        if not isinstance(latest_debt, Decimal) or not latest_debt.is_finite():
+            raise MetricUnavailableError(
+                self._ticker(),
+                "market value of debt",
+                source_attempted="Stock.debt_series",
+                suggested_override="Provide market_debt_override.",
+            )
+        return latest_debt
+
+    def _require_assumptions(self) -> ValuationAssumptions:
+        if self.assumptions is None:
+            raise InvalidAssumptionsError(
+                "assumptions",
+                "Cost-of-capital calculations require valuation assumptions.",
+                suggested_override="Provide ValuationAssumptions with a valuation date.",
+            )
+        return self.assumptions
 
     def _ticker(self) -> str:
         return self.stock.normalized_ticker()
