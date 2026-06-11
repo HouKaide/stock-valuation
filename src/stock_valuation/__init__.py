@@ -17,12 +17,14 @@ from stock_valuation.contracts import (
     WaccResult,
     to_json_safe,
 )
+from stock_valuation.processor import DamodaranValuationProcessor
 from stock_valuation.stock import Stock
 from stock_valuation.yfinance_client import YFinanceClient
 
 __all__ = [
     "CostOfDebtResult",
     "CostOfEquityResult",
+    "DamodaranValuationProcessor",
     "Diagnostic",
     "DiscountResult",
     "EquityBridgeResult",
