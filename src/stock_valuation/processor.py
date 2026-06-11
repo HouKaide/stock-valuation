@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -12,9 +13,12 @@ from stock_valuation.contracts import (
     CostOfDebtResult,
     CostOfEquityResult,
     Diagnostic,
+    DiscountResult,
     EstimatedGrowthResult,
     FcffResult,
     GrowthRegressionResult,
+    TerminalGrowthResult,
+    TerminalValueResult,
     ValuationAssumptions,
     WaccResult,
 )
@@ -27,6 +31,7 @@ from stock_valuation.providers import (
     EquityRiskPremiumProvider,
     MacroRateProvider,
     MarketDebtProvider,
+    SovereignYieldProvider,
     TaxRateProvider,
 )
 from stock_valuation.stock import Stock
@@ -108,6 +113,80 @@ def calculate_nopat(
     return nopat
 
 
+def validate_terminal_growth(
+    wacc: Decimal,
+    terminal_growth_rate: Decimal,
+) -> None:
+    """Require finite terminal growth strictly below WACC.
+
+    Parameters
+    ----------
+    wacc:
+        Weighted average cost of capital.
+    terminal_growth_rate:
+        Perpetual terminal growth rate.
+
+    Raises
+    ------
+    InvalidAssumptionsError
+        If either rate is malformed or terminal growth is not below WACC.
+    """
+
+    _validate_decimal_input("wacc", wacc, period=None)
+    _validate_decimal_input(
+        "terminal_growth_rate",
+        terminal_growth_rate,
+        period=None,
+    )
+    if terminal_growth_rate >= wacc:
+        raise InvalidAssumptionsError(
+            "terminal_growth_rate",
+            "Terminal growth must be strictly lower than WACC.",
+            suggested_override="Provide terminal_growth_rate_override below WACC.",
+            value=terminal_growth_rate,
+            wacc=wacc,
+            terminal_growth_rate=terminal_growth_rate,
+        )
+
+
+def discount_factor(wacc: Decimal, year: int) -> Decimal:
+    """Calculate the discount factor for a forecast year.
+
+    Parameters
+    ----------
+    wacc:
+        Weighted average cost of capital.
+    year:
+        Positive forecast year.
+
+    Returns
+    -------
+    Decimal
+        Discount factor ``1 / (1 + WACC) ** year``.
+
+    Raises
+    ------
+    InvalidAssumptionsError
+        If WACC is malformed, ``1 + WACC`` is non-positive, or year is not a
+        positive integer.
+    """
+
+    _validate_decimal_input("wacc", wacc, period=year)
+    if Decimal("1") + wacc <= 0:
+        raise InvalidAssumptionsError(
+            "wacc",
+            "One plus WACC must be positive for discounting.",
+            value=wacc,
+        )
+    if isinstance(year, bool) or not isinstance(year, int) or year <= 0:
+        raise InvalidAssumptionsError(
+            "year",
+            "Discount year must be a positive integer.",
+            value=year,
+        )
+    return Decimal("1") / ((Decimal("1") + wacc) ** year)
+
+
 @dataclass
 class DamodaranValuationProcessor:
     """Calculate FCFF and growth from normalized stock data.
@@ -127,6 +206,8 @@ class DamodaranValuationProcessor:
         Optional provider for corporate tax rates.
     market_debt_provider:
         Optional provider for market debt values.
+    sovereign_yield_provider:
+        Optional provider for deterministic sovereign-yield discovery.
     """
 
     stock: Stock
@@ -135,6 +216,7 @@ class DamodaranValuationProcessor:
     erp_provider: EquityRiskPremiumProvider | None = None
     tax_rate_provider: TaxRateProvider | None = None
     market_debt_provider: MarketDebtProvider | None = None
+    sovereign_yield_provider: SovereignYieldProvider | None = None
     diagnostics: list[Diagnostic] = field(default_factory=list, init=False)
 
     def calculate_fcff(self) -> FcffResult:
@@ -924,6 +1006,298 @@ class DamodaranValuationProcessor:
             after_tax_cost_of_debt=debt_cost.after_tax_cost_of_debt,
         )
 
+    def terminal_growth_rate(self) -> TerminalGrowthResult:
+        """Resolve terminal growth from an override or sovereign yield.
+
+        Returns
+        -------
+        TerminalGrowthResult
+            Selected instrument, yield, date, provider, fallbacks, and
+            diagnostics.
+
+        Raises
+        ------
+        ProviderUnavailableError
+            If no override or usable deterministic provider result exists.
+        """
+
+        assumptions = self._require_assumptions()
+        if assumptions.terminal_growth_rate_override is not None:
+            diagnostic = Diagnostic(
+                kind="override",
+                message="Used terminal-growth-rate override.",
+                ticker=self._ticker(),
+                metric="terminal growth rate",
+                source_attempted="ValuationAssumptions.terminal_growth_rate_override",
+            )
+            self._record_diagnostic(diagnostic)
+            return TerminalGrowthResult(
+                selected_instrument="override",
+                yield_value=assumptions.terminal_growth_rate_override,
+                valuation_date=assumptions.valuation_date,
+                provider="user override",
+                fallbacks_attempted=(),
+                diagnostics=[diagnostic],
+            )
+        if self.sovereign_yield_provider is None:
+            raise ProviderUnavailableError(
+                "sovereign yield provider",
+                "terminal growth rate",
+                suggested_override="Provide terminal_growth_rate_override or configure a sovereign-yield provider.",
+            )
+
+        currency = (
+            assumptions.valuation_currency_override or self.stock.valuation_currency()
+        )
+        country = (
+            assumptions.company_country_override or self.stock.headquarters_country()
+        )
+        result = self.sovereign_yield_provider.find_10y_sovereign_yield(
+            currency,
+            country,
+            assumptions.valuation_date,
+        )
+        selected = result.selected
+        if (
+            not isinstance(selected.yield_value, Decimal)
+            or not selected.yield_value.is_finite()
+        ):
+            raise ProviderUnavailableError(
+                result.provider or type(self.sovereign_yield_provider).__name__,
+                "terminal growth rate",
+                source_attempted=selected.symbol,
+                suggested_override="Provide terminal_growth_rate_override.",
+            )
+        rejected_symbols = tuple(candidate.symbol for candidate in result.rejected)
+        selection_diagnostic = Diagnostic(
+            kind="provider",
+            message=(
+                f"Selected {selected.symbol} for {currency}/{country}; "
+                f"rejected alternatives: {', '.join(rejected_symbols) or 'none'}."
+            ),
+            ticker=self._ticker(),
+            metric="terminal growth rate",
+            provider=result.provider,
+            source_attempted=selected.symbol,
+            fallbacks_attempted=rejected_symbols,
+        )
+        diagnostics = [*result.diagnostics, selection_diagnostic]
+        for diagnostic in diagnostics:
+            self._record_diagnostic(diagnostic)
+        return TerminalGrowthResult(
+            selected_instrument=selected.symbol,
+            yield_value=selected.yield_value,
+            valuation_date=result.valuation_date,
+            provider=result.provider,
+            fallbacks_attempted=rejected_symbols,
+            diagnostics=diagnostics,
+        )
+
+    def terminal_value(
+        self,
+        final_forecast_year_fcff: Decimal,
+        wacc: Decimal,
+        terminal_growth_rate: Decimal,
+        forecast_years: int,
+    ) -> TerminalValueResult:
+        """Calculate terminal value and its present value.
+
+        Parameters
+        ----------
+        final_forecast_year_fcff:
+            FCFF in the final explicit forecast year.
+        wacc:
+            Weighted average cost of capital.
+        terminal_growth_rate:
+            Perpetual terminal growth rate.
+        forecast_years:
+            Number of years from valuation date to terminal value.
+
+        Returns
+        -------
+        TerminalValueResult
+            Final FCFF, growth, next-year FCFF, terminal value, present value,
+            calculation steps, and diagnostics.
+
+        Raises
+        ------
+        InvalidAssumptionsError
+            If inputs are malformed, forecast years are invalid, or terminal
+            growth is not below WACC.
+        """
+
+        _validate_decimal_input(
+            "final_forecast_year_fcff",
+            final_forecast_year_fcff,
+            period=forecast_years,
+        )
+        validate_positive_operating_base(
+            "final_forecast_year_fcff",
+            final_forecast_year_fcff,
+            period=forecast_years,
+        )
+        if isinstance(forecast_years, bool) or not isinstance(forecast_years, int):
+            raise InvalidAssumptionsError(
+                "forecast_years",
+                "Forecast years must be an integer.",
+                value=forecast_years,
+            )
+        if forecast_years <= 0:
+            raise InvalidAssumptionsError(
+                "forecast_years",
+                "Forecast years must be positive.",
+                value=forecast_years,
+            )
+        validate_terminal_growth(wacc, terminal_growth_rate)
+        next_year_fcff = final_forecast_year_fcff * (
+            Decimal("1") + terminal_growth_rate
+        )
+        terminal_value = next_year_fcff / (wacc - terminal_growth_rate)
+        present_value = terminal_value / ((Decimal("1") + wacc) ** forecast_years)
+        diagnostic = Diagnostic(
+            kind="calculation",
+            message=(
+                f"Validated terminal growth below WACC and discounted terminal "
+                f"value over {forecast_years} years."
+            ),
+            ticker=self._ticker(),
+            metric="terminal value",
+            source_attempted="Gordon growth model",
+        )
+        self._record_diagnostic(diagnostic)
+        return TerminalValueResult(
+            final_forecast_year_fcff=final_forecast_year_fcff,
+            terminal_growth_rate=terminal_growth_rate,
+            next_year_fcff=next_year_fcff,
+            terminal_value=terminal_value,
+            present_value_terminal_value=present_value,
+            calculation_steps=(
+                "FCF_n+1 = FCF_n * (1 + g)",
+                "Terminal Value = FCF_n+1 / (WACC - g)",
+                "Present Value of Terminal Value = Terminal Value / (1 + WACC)^n",
+            ),
+            diagnostics=[diagnostic],
+        )
+
+    def forecast_fcff_discount_table(
+        self,
+        forecast_fcffs: Sequence[Decimal],
+        wacc: Decimal,
+    ) -> pd.DataFrame:
+        """Build an ordered table of discounted forecast FCFF values.
+
+        Parameters
+        ----------
+        forecast_fcffs:
+            Forecast FCFF values ordered from year one onward.
+        wacc:
+            Weighted average cost of capital.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Deterministic rows with year, FCFF, discount factor, and present
+            value.
+        """
+
+        rows: list[dict[str, Any]] = []
+        for year, fcff in enumerate(forecast_fcffs, start=1):
+            _validate_decimal_input("forecast_fcff", fcff, period=year)
+            factor = discount_factor(wacc, year)
+            rows.append(
+                {
+                    "year": year,
+                    "fcff": fcff,
+                    "discount_factor": factor,
+                    "present_value": fcff * factor,
+                    "cash_flow_type": "forecast",
+                }
+            )
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "year",
+                "fcff",
+                "discount_factor",
+                "present_value",
+                "cash_flow_type",
+            ],
+        )
+
+    def discount_to_today(
+        self,
+        forecast_fcffs: Sequence[Decimal],
+        wacc: Decimal,
+        terminal_value: Decimal,
+    ) -> DiscountResult:
+        """Discount forecast FCFF and terminal value to today.
+
+        Parameters
+        ----------
+        forecast_fcffs:
+            Forecast FCFF values ordered from year one onward.
+        wacc:
+            Weighted average cost of capital.
+        terminal_value:
+            Undiscounted terminal value at the final forecast year.
+
+        Returns
+        -------
+        DiscountResult
+            Discount table, forecast present value, terminal present value,
+            enterprise value, and diagnostics.
+        """
+
+        if not forecast_fcffs:
+            raise InvalidAssumptionsError(
+                "forecast_fcffs",
+                "At least one forecast FCFF value is required.",
+            )
+        _validate_decimal_input(
+            "terminal_value", terminal_value, period=len(forecast_fcffs)
+        )
+        forecast_table = self.forecast_fcff_discount_table(forecast_fcffs, wacc)
+        terminal_factor = discount_factor(wacc, len(forecast_fcffs))
+        present_value_terminal = terminal_value * terminal_factor
+        terminal_row = pd.DataFrame(
+            [
+                {
+                    "year": len(forecast_fcffs),
+                    "fcff": terminal_value,
+                    "discount_factor": terminal_factor,
+                    "present_value": present_value_terminal,
+                    "cash_flow_type": "terminal",
+                }
+            ]
+        )
+        discount_table = pd.concat(
+            [forecast_table, terminal_row],
+            ignore_index=True,
+        )
+        present_value_forecasts = sum(
+            forecast_table["present_value"],
+            Decimal("0"),
+        )
+        enterprise_value = present_value_forecasts + present_value_terminal
+        diagnostic = Diagnostic(
+            kind="calculation",
+            message=(
+                f"Built discount table with {len(forecast_fcffs)} forecast rows "
+                "and one terminal row."
+            ),
+            ticker=self._ticker(),
+            metric="discounting",
+            source_attempted="forecast FCFF and terminal value",
+        )
+        self._record_diagnostic(diagnostic)
+        return DiscountResult(
+            discount_table=discount_table,
+            present_value_forecast_fcffs=present_value_forecasts,
+            present_value_terminal_value=present_value_terminal,
+            enterprise_value=enterprise_value,
+            diagnostics=[diagnostic],
+        )
+
     def _reinvestment_rate_series(self) -> pd.Series:
         inputs = self.stock.latest_fcff_inputs()
         nopat = calculate_nopat(inputs.ebit, inputs.tax_rate, period=inputs.period)
@@ -1047,5 +1421,7 @@ def _validate_decimal_input(
 __all__ = [
     "DamodaranValuationProcessor",
     "calculate_nopat",
+    "discount_factor",
+    "validate_terminal_growth",
     "validate_positive_operating_base",
 ]
