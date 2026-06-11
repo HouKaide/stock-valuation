@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from stock_valuation.contracts import FcffInputs
 from stock_valuation.errors import MetricUnavailableError
@@ -31,36 +31,11 @@ from stock_valuation.mapping import (
     map_valuation_currency,
     map_working_capital_change_series,
 )
+from stock_valuation.providers import TaxRateProvider
 from stock_valuation.yfinance_client import YFinanceClient
 
 if TYPE_CHECKING:
     import pandas as pd
-
-
-class TaxRateProvider(Protocol):
-    """Provider for country-level corporate tax rates.
-
-    Methods
-    -------
-    get_corporate_tax_rate(country, valuation_date)
-        Return the marginal corporate tax rate for a country and date.
-    """
-
-    def get_corporate_tax_rate(self, country: str, valuation_date: date) -> Decimal:
-        """Return the marginal corporate tax rate for a country and date.
-
-        Parameters
-        ----------
-        country:
-            Company headquarters country.
-        valuation_date:
-            Date used to resolve the applicable tax rate.
-
-        Returns
-        -------
-        Decimal
-            Corporate tax rate as a decimal fraction.
-        """
 
 
 @dataclass
