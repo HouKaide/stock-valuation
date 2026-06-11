@@ -99,7 +99,9 @@ class ValuationAssumptions:
     def __post_init__(self) -> None:
         """Validate assumption boundaries."""
 
-        if isinstance(self.forecast_years, bool) or not isinstance(self.forecast_years, int):
+        if isinstance(self.forecast_years, bool) or not isinstance(
+            self.forecast_years, int
+        ):
             raise InvalidAssumptionsError(
                 "forecast_years",
                 "Forecast years must be an integer.",
@@ -468,6 +470,8 @@ class EquityBridgeResult:
         Equity value after bridge adjustments.
     diagnostics:
         Source, fallback, override, and failure diagnostics.
+    calculation_steps:
+        Human-readable equity bridge formula.
     """
 
     enterprise_value: Decimal
@@ -477,6 +481,7 @@ class EquityBridgeResult:
     minority_interest: Decimal
     equity_value: Decimal
     diagnostics: list[Diagnostic]
+    calculation_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -559,11 +564,16 @@ def to_json_safe(value: Any) -> Any:
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, pd.DataFrame):
-        return [_json_safe_mapping(record) for record in value.to_dict(orient="records")]
+        return [
+            _json_safe_mapping(record) for record in value.to_dict(orient="records")
+        ]
     if isinstance(value, pd.Series):
         return {str(key): to_json_safe(item) for key, item in value.to_dict().items()}
     if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: to_json_safe(getattr(value, field.name)) for field in fields(value)}
+        return {
+            field.name: to_json_safe(getattr(value, field.name))
+            for field in fields(value)
+        }
     if isinstance(value, Mapping):
         return _json_safe_mapping(value)
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):

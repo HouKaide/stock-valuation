@@ -25,6 +25,8 @@ from stock_valuation.mapping import (
     map_interest_expense_series,
     map_invested_capital_series,
     map_market_cap,
+    map_minority_interest_series,
+    map_non_operating_assets_series,
     map_revenue_series,
     map_shares_outstanding,
     map_trading_currency,
@@ -62,8 +64,12 @@ class Stock:
     mapping_metadata: list[SourceMetadata] = field(default_factory=list, init=False)
     _info: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _fast_info: Mapping[str, Any] | None = field(default=None, init=False, repr=False)
-    _annual_income_statement: pd.DataFrame | None = field(default=None, init=False, repr=False)
-    _annual_balance_sheet: pd.DataFrame | None = field(default=None, init=False, repr=False)
+    _annual_income_statement: pd.DataFrame | None = field(
+        default=None, init=False, repr=False
+    )
+    _annual_balance_sheet: pd.DataFrame | None = field(
+        default=None, init=False, repr=False
+    )
     _annual_cashflow: pd.DataFrame | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -81,7 +87,9 @@ class Stock:
             yfinance long name, short name, or normalized ticker fallback.
         """
 
-        name = map_company_name(self.raw_info(), self.normalized_ticker(), metadata=self.mapping_metadata)
+        name = map_company_name(
+            self.raw_info(), self.normalized_ticker(), metadata=self.mapping_metadata
+        )
         if self.mapping_metadata[-1].selected_source == "ticker":
             self.diagnostics.append("Company name unavailable; using ticker symbol.")
         return name
@@ -168,7 +176,9 @@ class Stock:
                 self.normalized_ticker(),
                 metadata=self.mapping_metadata,
             )
-            self.diagnostics.append("Current price resolved from latest historical close.")
+            self.diagnostics.append(
+                "Current price resolved from latest historical close."
+            )
             return price
 
     def market_cap(self) -> Decimal | None:
@@ -244,7 +254,9 @@ class Stock:
         """
 
         if self._annual_income_statement is None:
-            self._annual_income_statement = self.yfinance_client.get_income_statement(freq="yearly")
+            self._annual_income_statement = self.yfinance_client.get_income_statement(
+                freq="yearly"
+            )
         return self._annual_income_statement
 
     def annual_balance_sheet(self) -> "pd.DataFrame":
@@ -257,7 +269,9 @@ class Stock:
         """
 
         if self._annual_balance_sheet is None:
-            self._annual_balance_sheet = self.yfinance_client.get_balance_sheet(freq="yearly")
+            self._annual_balance_sheet = self.yfinance_client.get_balance_sheet(
+                freq="yearly"
+            )
         return self._annual_balance_sheet
 
     def annual_cashflow(self) -> "pd.DataFrame":
@@ -400,6 +414,36 @@ class Stock:
             metadata=self.mapping_metadata,
         )
 
+    def non_operating_assets_series(self) -> "pd.Series | None":
+        """Return identifiable annual non-operating financial assets.
+
+        Returns
+        -------
+        pandas.Series | None
+            Positive annual non-operating assets, or ``None`` when unavailable.
+        """
+
+        return map_non_operating_assets_series(
+            self.annual_balance_sheet(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
+
+    def minority_interest_series(self) -> "pd.Series | None":
+        """Return annual minority interest as a positive claim.
+
+        Returns
+        -------
+        pandas.Series | None
+            Positive annual minority interest, or ``None`` when unavailable.
+        """
+
+        return map_minority_interest_series(
+            self.annual_balance_sheet(),
+            self.normalized_ticker(),
+            metadata=self.mapping_metadata,
+        )
+
     def latest_fcff_inputs(self) -> FcffInputs:
         """Return the latest common-period FCFF input bundle.
 
@@ -427,12 +471,16 @@ class Stock:
             "FCFF inputs",
         )
         common_periods = (
-            ebit.index.intersection(depreciation.index).intersection(capex.index).intersection(working_capital.index)
+            ebit.index.intersection(depreciation.index)
+            .intersection(capex.index)
+            .intersection(working_capital.index)
         )
         if common_periods.empty:
             raise self._metric_error("FCFF inputs", "common annual statement periods")
         period = common_periods[-1]
-        self._record_diagnostic_once(f"FCFF inputs resolved from annual statement period {period}.")
+        self._record_diagnostic_once(
+            f"FCFF inputs resolved from annual statement period {period}."
+        )
         return FcffInputs(
             period=period,
             ebit=ebit.loc[period],
@@ -477,7 +525,9 @@ class Stock:
         valid = invested_capital[invested_capital != Decimal("0")]
         nopat = nopat.loc[valid.index]
         if valid.empty:
-            raise self._metric_error("return on capital", "prior-period invested capital")
+            raise self._metric_error(
+                "return on capital", "prior-period invested capital"
+            )
         return nopat / valid
 
     def reinvestment_rate_series(self) -> "pd.Series":
@@ -502,8 +552,12 @@ class Stock:
             "reinvestment rate",
         )
         nopat = self.ebit_series() * (Decimal("1") - self._tax_rate_for_valuation())
-        capex, nopat = align_series(capex, nopat, self.normalized_ticker(), "reinvestment rate")
-        reinvestment = capex - depreciation.loc[capex.index] + working_capital.loc[capex.index]
+        capex, nopat = align_series(
+            capex, nopat, self.normalized_ticker(), "reinvestment rate"
+        )
+        reinvestment = (
+            capex - depreciation.loc[capex.index] + working_capital.loc[capex.index]
+        )
         valid = nopat[nopat != Decimal("0")]
         reinvestment = reinvestment.loc[valid.index]
         if valid.empty:
@@ -552,14 +606,20 @@ class Stock:
             self._record_diagnostic_once("Tax rate resolved from explicit override.")
             return self.tax_rate
         if self.tax_rate_provider is None:
-            self._record_diagnostic_once("Tax rate provider unavailable; using 0 for stock-level normalized rates.")
+            self._record_diagnostic_once(
+                "Tax rate provider unavailable; using 0 for stock-level normalized rates."
+            )
             return Decimal("0")
         valuation_date = date.today()
         country = self.headquarters_country()
-        self._record_diagnostic_once(f"Tax rate resolved from provider for {country} on {valuation_date}.")
+        self._record_diagnostic_once(
+            f"Tax rate resolved from provider for {country} on {valuation_date}."
+        )
         return self.tax_rate_provider.get_corporate_tax_rate(country, valuation_date)
 
-    def _metric_error(self, metric_name: str, source_attempted: str) -> MetricUnavailableError:
+    def _metric_error(
+        self, metric_name: str, source_attempted: str
+    ) -> MetricUnavailableError:
         return MetricUnavailableError(
             self.normalized_ticker(),
             metric_name,

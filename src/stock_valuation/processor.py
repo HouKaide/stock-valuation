@@ -14,12 +14,14 @@ from stock_valuation.contracts import (
     CostOfEquityResult,
     Diagnostic,
     DiscountResult,
+    EquityBridgeResult,
     EstimatedGrowthResult,
     FcffResult,
     GrowthRegressionResult,
     TerminalGrowthResult,
     TerminalValueResult,
     ValuationAssumptions,
+    ValuationResult,
     WaccResult,
 )
 from stock_valuation.errors import (
@@ -1298,6 +1300,512 @@ class DamodaranValuationProcessor:
             diagnostics=[diagnostic],
         )
 
+    def debt_adjustment(self, wacc_result: WaccResult | None = None) -> Decimal:
+        """Resolve the positive debt claim used by the equity bridge.
+
+        Parameters
+        ----------
+        wacc_result:
+            Optional WACC result containing an already-resolved market debt.
+
+        Returns
+        -------
+        Decimal
+            Positive debt deducted from enterprise value.
+        """
+
+        override = (
+            self.assumptions.market_debt_override
+            if self.assumptions is not None
+            else None
+        )
+        if override is not None:
+            debt = override
+            kind = "override"
+            message = "Used market-debt override for the equity bridge."
+            source = "ValuationAssumptions.market_debt_override"
+        elif wacc_result is not None:
+            debt = wacc_result.market_value_of_debt
+            kind = "source"
+            message = "Reused market debt resolved by the WACC flow."
+            source = "WaccResult.market_value_of_debt"
+        else:
+            debt = self._latest_book_debt()
+            kind = "fallback"
+            message = "Used latest book debt for the equity bridge."
+            source = "Stock.debt_series"
+        _validate_non_negative_decimal("debt", debt)
+        if debt == 0:
+            raise MetricUnavailableError(
+                self._ticker(),
+                "debt adjustment",
+                source_attempted=source,
+                suggested_override="Provide a positive market_debt_override.",
+            )
+        self._record_diagnostic(
+            Diagnostic(
+                kind=kind,
+                message=message,
+                ticker=self._ticker(),
+                metric="debt adjustment",
+                source_attempted=source,
+            )
+        )
+        return debt
+
+    def cash_adjustment(self, *, allow_zero_when_missing: bool = True) -> Decimal:
+        """Resolve the positive cash adjustment used by the equity bridge.
+
+        Parameters
+        ----------
+        allow_zero_when_missing:
+            Whether unavailable cash may default to zero with a diagnostic.
+
+        Returns
+        -------
+        Decimal
+            Positive cash added to enterprise value.
+
+        Raises
+        ------
+        MetricUnavailableError
+            If cash is unavailable and zero fallback is disabled.
+        """
+
+        try:
+            cash_series = self.stock.cash_series().sort_index()
+            if cash_series.empty:
+                raise MetricUnavailableError(
+                    self._ticker(),
+                    "cash adjustment",
+                    source_attempted="Stock.cash_series",
+                )
+            cash = cash_series.iloc[-1]
+            _validate_non_negative_decimal("cash", cash)
+        except MetricUnavailableError:
+            if not allow_zero_when_missing:
+                raise
+            cash = Decimal("0")
+            diagnostic = Diagnostic(
+                kind="fallback",
+                message="Cash was unavailable; used zero for the equity bridge.",
+                ticker=self._ticker(),
+                metric="cash adjustment",
+                source_attempted="Stock.cash_series",
+            )
+        else:
+            diagnostic = Diagnostic(
+                kind="source",
+                message="Resolved cash from the latest normalized balance-sheet value.",
+                ticker=self._ticker(),
+                metric="cash adjustment",
+                source_attempted="Stock.cash_series",
+            )
+        self._record_diagnostic(diagnostic)
+        return cash
+
+    def non_operating_assets(
+        self,
+        explicit_value: Decimal | None = None,
+    ) -> Decimal:
+        """Resolve non-operating assets or default the adjustment to zero.
+
+        Parameters
+        ----------
+        explicit_value:
+            Optional user-supplied non-operating asset value.
+
+        Returns
+        -------
+        Decimal
+            Positive non-operating assets added to enterprise value.
+        """
+
+        if explicit_value is not None:
+            _validate_non_negative_decimal("non_operating_assets", explicit_value)
+            value = explicit_value
+            diagnostic = Diagnostic(
+                kind="override",
+                message="Used explicit non-operating assets value.",
+                ticker=self._ticker(),
+                metric="non-operating assets",
+                source_attempted="explicit_value",
+            )
+        else:
+            series = self.stock.non_operating_assets_series()
+            if series is None or series.empty:
+                value = Decimal("0")
+                diagnostic = Diagnostic(
+                    kind="fallback",
+                    message=(
+                        "No identifiable non-operating assets source existed; "
+                        "used zero."
+                    ),
+                    ticker=self._ticker(),
+                    metric="non-operating assets",
+                    source_attempted="Stock.non_operating_assets_series",
+                )
+            else:
+                value = series.sort_index().iloc[-1]
+                _validate_non_negative_decimal("non_operating_assets", value)
+                diagnostic = Diagnostic(
+                    kind="source",
+                    message=(
+                        "Resolved non-operating assets from the latest normalized "
+                        "balance-sheet value."
+                    ),
+                    ticker=self._ticker(),
+                    metric="non-operating assets",
+                    source_attempted="Stock.non_operating_assets_series",
+                )
+        self._record_diagnostic(diagnostic)
+        return value
+
+    def minority_interest(self) -> Decimal:
+        """Resolve minority interest or default the adjustment to zero.
+
+        Returns
+        -------
+        Decimal
+            Positive minority interest deducted from enterprise value.
+        """
+
+        series = self.stock.minority_interest_series()
+        if series is None or series.empty:
+            value = Decimal("0")
+            diagnostic = Diagnostic(
+                kind="fallback",
+                message="Minority interest was unavailable; used zero.",
+                ticker=self._ticker(),
+                metric="minority interest",
+                source_attempted="Stock.minority_interest_series",
+            )
+        else:
+            value = series.sort_index().iloc[-1]
+            _validate_non_negative_decimal("minority_interest", value)
+            diagnostic = Diagnostic(
+                kind="source",
+                message=(
+                    "Resolved minority interest from the latest normalized "
+                    "balance-sheet value."
+                ),
+                ticker=self._ticker(),
+                metric="minority interest",
+                source_attempted="Stock.minority_interest_series",
+            )
+        self._record_diagnostic(diagnostic)
+        return value
+
+    def equity_bridge(
+        self,
+        enterprise_value: Decimal,
+        *,
+        wacc_result: WaccResult | None = None,
+        non_operating_assets: Decimal | None = None,
+        allow_zero_cash: bool = True,
+    ) -> EquityBridgeResult:
+        """Convert enterprise value to equity value.
+
+        Parameters
+        ----------
+        enterprise_value:
+            Discounted enterprise value.
+        wacc_result:
+            Optional WACC result containing resolved market debt.
+        non_operating_assets:
+            Optional explicit non-operating assets value.
+        allow_zero_cash:
+            Whether unavailable cash may default to zero.
+
+        Returns
+        -------
+        EquityBridgeResult
+            Every bridge component, equity value, formula, and diagnostics.
+        """
+
+        _validate_decimal_input("enterprise_value", enterprise_value, period=None)
+        diagnostic_start = len(self.diagnostics)
+        debt = self.debt_adjustment(wacc_result)
+        cash = self.cash_adjustment(allow_zero_when_missing=allow_zero_cash)
+        other_assets = self.non_operating_assets(non_operating_assets)
+        minority_interest = self.minority_interest()
+        equity_value = enterprise_value - debt + cash + other_assets - minority_interest
+        diagnostic = Diagnostic(
+            kind="calculation",
+            message="Calculated equity value from explicit bridge adjustments.",
+            ticker=self._ticker(),
+            metric="equity value",
+            source_attempted="enterprise value and equity bridge components",
+        )
+        self._record_diagnostic(diagnostic)
+        return EquityBridgeResult(
+            enterprise_value=enterprise_value,
+            debt=debt,
+            cash=cash,
+            non_operating_assets=other_assets,
+            minority_interest=minority_interest,
+            equity_value=equity_value,
+            diagnostics=self.diagnostics[diagnostic_start:],
+            calculation_steps=(
+                "Equity Value = Enterprise Value - Debt + Cash "
+                "+ Non-Operating Assets - Minority Interest",
+            ),
+        )
+
+    def shares_outstanding(self) -> Decimal:
+        """Resolve and validate shares outstanding.
+
+        Returns
+        -------
+        Decimal
+            Positive shares outstanding.
+
+        Raises
+        ------
+        InvalidAssumptionsError
+            If an override is zero or negative.
+        MetricUnavailableError
+            If the normalized stock value is zero or negative.
+        """
+
+        override = (
+            self.assumptions.shares_outstanding_override
+            if self.assumptions is not None
+            else None
+        )
+        if override is not None:
+            if not override.is_finite() or override <= 0:
+                raise InvalidAssumptionsError(
+                    "shares_outstanding_override",
+                    "Shares outstanding must be finite and greater than zero.",
+                    value=override,
+                )
+            shares = override
+            diagnostic = Diagnostic(
+                kind="override",
+                message="Used shares-outstanding override.",
+                ticker=self._ticker(),
+                metric="shares outstanding",
+                source_attempted="ValuationAssumptions.shares_outstanding_override",
+            )
+        else:
+            shares = self.stock.shares_outstanding()
+            if not isinstance(shares, Decimal) or not shares.is_finite() or shares <= 0:
+                raise MetricUnavailableError(
+                    self._ticker(),
+                    "shares outstanding",
+                    source_attempted="Stock.shares_outstanding",
+                    suggested_override="Provide a positive shares_outstanding_override.",
+                )
+            diagnostic = Diagnostic(
+                kind="source",
+                message="Resolved shares outstanding from normalized stock data.",
+                ticker=self._ticker(),
+                metric="shares outstanding",
+                source_attempted="Stock.shares_outstanding",
+            )
+        self._record_diagnostic(diagnostic)
+        return shares
+
+    def intrinsic_value_per_share(
+        self,
+        equity_value: Decimal,
+        shares_outstanding: Decimal | None = None,
+    ) -> Decimal:
+        """Calculate intrinsic value per share.
+
+        Parameters
+        ----------
+        equity_value:
+            Equity value after bridge adjustments.
+        shares_outstanding:
+            Optional already-resolved positive share count.
+
+        Returns
+        -------
+        Decimal
+            Exact Decimal quotient of equity value and shares outstanding.
+        """
+
+        _validate_decimal_input("equity_value", equity_value, period=None)
+        shares = (
+            self.shares_outstanding()
+            if shares_outstanding is None
+            else shares_outstanding
+        )
+        if not isinstance(shares, Decimal) or not shares.is_finite() or shares <= 0:
+            raise InvalidAssumptionsError(
+                "shares_outstanding",
+                "Shares outstanding must be finite and greater than zero.",
+                value=shares,
+            )
+        return equity_value / shares
+
+    def current_price(self) -> Decimal | None:
+        """Resolve current price without blocking intrinsic value calculation.
+
+        Returns
+        -------
+        Decimal | None
+            Current market price, or ``None`` when unavailable.
+        """
+
+        try:
+            price = self.stock.current_price()
+        except MetricUnavailableError:
+            self._record_diagnostic(
+                Diagnostic(
+                    kind="fallback",
+                    message="Current price was unavailable; omitted market comparison.",
+                    ticker=self._ticker(),
+                    metric="current price",
+                    source_attempted="Stock.current_price",
+                )
+            )
+            return None
+        self._record_diagnostic(
+            Diagnostic(
+                kind="source",
+                message="Resolved current price from normalized stock data.",
+                ticker=self._ticker(),
+                metric="current price",
+                source_attempted="Stock.current_price",
+            )
+        )
+        return price
+
+    def upside_downside(
+        self,
+        intrinsic_value_per_share: Decimal,
+        current_price: Decimal | None,
+    ) -> Decimal | None:
+        """Calculate upside or downside relative to current price.
+
+        Parameters
+        ----------
+        intrinsic_value_per_share:
+            Calculated intrinsic value per share.
+        current_price:
+            Current market price, or ``None`` when unavailable.
+
+        Returns
+        -------
+        Decimal | None
+            Relative upside or downside, or ``None`` without current price.
+        """
+
+        _validate_decimal_input(
+            "intrinsic_value_per_share",
+            intrinsic_value_per_share,
+            period=None,
+        )
+        if current_price is None:
+            self._record_diagnostic(
+                Diagnostic(
+                    kind="fallback",
+                    message="Upside/downside omitted because current price is unavailable.",
+                    ticker=self._ticker(),
+                    metric="upside/downside",
+                    source_attempted="current price",
+                )
+            )
+            return None
+        if not isinstance(current_price, Decimal) or not current_price.is_finite():
+            raise InvalidAssumptionsError(
+                "current_price",
+                "Current price must be a finite Decimal.",
+                value=current_price,
+            )
+        if current_price <= 0:
+            raise InvalidAssumptionsError(
+                "current_price",
+                "Current price must be greater than zero.",
+                value=current_price,
+            )
+        return intrinsic_value_per_share / current_price - Decimal("1")
+
+    def assemble_valuation_result(
+        self,
+        *,
+        forecast_table: pd.DataFrame,
+        fcff: FcffResult,
+        growth: EstimatedGrowthResult,
+        cost_of_equity: CostOfEquityResult,
+        cost_of_debt: CostOfDebtResult,
+        wacc: WaccResult,
+        terminal_value: TerminalValueResult,
+        discounting: DiscountResult,
+        non_operating_assets: Decimal | None = None,
+        allow_zero_cash: bool = True,
+    ) -> ValuationResult:
+        """Assemble upstream valuation outputs with bridge and per-share values.
+
+        Parameters
+        ----------
+        forecast_table:
+            Explicit forecast-period data.
+        fcff:
+            FCFF result.
+        growth:
+            Estimated-growth result.
+        cost_of_equity:
+            Cost-of-equity result.
+        cost_of_debt:
+            Cost-of-debt result.
+        wacc:
+            WACC result containing resolved market debt.
+        terminal_value:
+            Terminal-value result.
+        discounting:
+            Discounting result containing enterprise value.
+        non_operating_assets:
+            Optional explicit non-operating assets value.
+        allow_zero_cash:
+            Whether unavailable cash may default to zero.
+
+        Returns
+        -------
+        ValuationResult
+            Complete valuation result including bridge and market comparison.
+        """
+
+        assumptions = self._require_assumptions()
+        bridge = self.equity_bridge(
+            discounting.enterprise_value,
+            wacc_result=wacc,
+            non_operating_assets=non_operating_assets,
+            allow_zero_cash=allow_zero_cash,
+        )
+        shares = self.shares_outstanding()
+        intrinsic_value = self.intrinsic_value_per_share(
+            bridge.equity_value,
+            shares,
+        )
+        current_price = self.current_price()
+        upside_downside = self.upside_downside(intrinsic_value, current_price)
+        return ValuationResult(
+            ticker=self._ticker(),
+            valuation_date=assumptions.valuation_date,
+            valuation_currency=(
+                assumptions.valuation_currency_override
+                or self.stock.valuation_currency()
+            ),
+            forecast_table=forecast_table,
+            fcff=fcff,
+            growth=growth,
+            cost_of_equity=cost_of_equity,
+            cost_of_debt=cost_of_debt,
+            wacc=wacc,
+            terminal_value=terminal_value,
+            discounting=discounting,
+            enterprise_value=discounting.enterprise_value,
+            equity_value=bridge.equity_value,
+            intrinsic_value_per_share=intrinsic_value,
+            current_price=current_price,
+            upside_downside_pct=upside_downside,
+            diagnostics=list(self.diagnostics),
+        )
+
     def _reinvestment_rate_series(self) -> pd.Series:
         inputs = self.stock.latest_fcff_inputs()
         nopat = calculate_nopat(inputs.ebit, inputs.tax_rate, period=inputs.period)
@@ -1414,6 +1922,15 @@ def _validate_decimal_input(
             "Calculation inputs must be finite Decimal values.",
             suggested_override=f"Provide {field_name} as a finite Decimal.",
             period=period,
+            value=value,
+        )
+
+
+def _validate_non_negative_decimal(field_name: str, value: Decimal) -> None:
+    if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
+        raise InvalidAssumptionsError(
+            field_name,
+            "Equity bridge adjustments must be finite, non-negative Decimals.",
             value=value,
         )
 

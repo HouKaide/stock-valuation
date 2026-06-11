@@ -121,7 +121,9 @@ def select_statement_row(
         Selected row, or ``None`` when no candidate row has values.
     """
 
-    normalized_rows = {_normalize_label(str(index)): row for index, row in statement.iterrows()}
+    normalized_rows = {
+        _normalize_label(str(index)): row for index, row in statement.iterrows()
+    }
     attempted: list[str] = []
     for row_name in row_names:
         source_path = f"{statement_name}.{row_name}"
@@ -205,7 +207,9 @@ def optional_metric(
     return value
 
 
-def to_decimal(value: Any, ticker: str, metric_name: str, *, absolute: bool = False) -> Decimal:
+def to_decimal(
+    value: Any, ticker: str, metric_name: str, *, absolute: bool = False
+) -> Decimal:
     """Convert a finite numeric scalar to ``Decimal``.
 
     Parameters
@@ -269,7 +273,12 @@ def normalize_currency(value: Any, metric_name: str) -> str:
     """
 
     raw_currency = "" if value is None else str(value).strip()
-    if raw_currency == "GBp" or raw_currency.upper() in {"GBX", "GBPENCE", "GBPENNY", "GBPEN"}:
+    if raw_currency == "GBp" or raw_currency.upper() in {
+        "GBX",
+        "GBPENCE",
+        "GBPENNY",
+        "GBPEN",
+    }:
         currency = "GBP"
     else:
         currency = raw_currency.upper()
@@ -350,9 +359,17 @@ def map_headquarters_country(
     if value is not None:
         return str(value).strip()
     if _is_present(override):
-        _record(metadata, "headquarters country", "override", ("info.country",), used_override=True)
+        _record(
+            metadata,
+            "headquarters country",
+            "override",
+            ("info.country",),
+            used_override=True,
+        )
         return str(override).strip()
-    return require_metric(None, ticker, "headquarters country", ("info.country", "override"))
+    return require_metric(
+        None, ticker, "headquarters country", ("info.country", "override")
+    )
 
 
 def map_valuation_currency(
@@ -600,7 +617,9 @@ def map_beta(
         Equity beta when available.
     """
 
-    value = select_mapping_value(info, ("beta",), "beta", source_name="info", metadata=metadata)
+    value = select_mapping_value(
+        info, ("beta",), "beta", source_name="info", metadata=metadata
+    )
     if value is not None:
         return to_decimal(value, ticker, "beta")
     if override is not None:
@@ -882,7 +901,11 @@ def map_depreciation_series(
         Chronological positive depreciation and amortization.
     """
 
-    row_names = ("Depreciation And Amortization", "Depreciation Amortization Depletion", "Depreciation")
+    row_names = (
+        "Depreciation And Amortization",
+        "Depreciation Amortization Depletion",
+        "Depreciation",
+    )
     row = select_statement_row(
         cashflow,
         row_names,
@@ -902,9 +925,12 @@ def map_depreciation_series(
         row,
         ticker,
         "depreciation and amortization",
-        tuple(f"cashflow.{name}" for name in row_names) + ("income_statement.Reconciled Depreciation",),
+        tuple(f"cashflow.{name}" for name in row_names)
+        + ("income_statement.Reconciled Depreciation",),
     )
-    return chronological_series(row, ticker, "depreciation and amortization", absolute=True)
+    return chronological_series(
+        row, ticker, "depreciation and amortization", absolute=True
+    )
 
 
 def map_capex_series(
@@ -932,7 +958,12 @@ def map_capex_series(
 
     return map_statement_series(
         cashflow,
-        ("Capital Expenditure", "Capital Expenditure Reported", "Purchase Of PPE", "Net PPE Purchase And Sale"),
+        (
+            "Capital Expenditure",
+            "Capital Expenditure Reported",
+            "Purchase Of PPE",
+            "Net PPE Purchase And Sale",
+        ),
         ticker,
         "capital expenditure",
         statement_name="cashflow",
@@ -1008,7 +1039,9 @@ def map_working_capital_change_series(
         ticker,
         "working capital liabilities",
     )
-    assets, liabilities = align_series(assets - cash, liabilities - current_debt, ticker, "working capital")
+    assets, liabilities = align_series(
+        assets - cash, liabilities - current_debt, ticker, "working capital"
+    )
     _record(
         metadata,
         "change in non-cash working capital",
@@ -1064,10 +1097,19 @@ def map_debt_series(
         ticker,
         "current debt",
     )
-    debt = chronological_series(long_term + current, ticker, "total debt", absolute=True)
+    debt = chronological_series(
+        long_term + current, ticker, "total debt", absolute=True
+    )
     if debt.empty or all(value == Decimal("0") for value in debt):
-        return require_metric(None, ticker, "total debt", ("balance_sheet.Total Debt", "debt components"))
-    _record(metadata, "total debt", "derived: long-term debt + current debt", ("balance_sheet.Total Debt",))
+        return require_metric(
+            None, ticker, "total debt", ("balance_sheet.Total Debt", "debt components")
+        )
+    _record(
+        metadata,
+        "total debt",
+        "derived: long-term debt + current debt",
+        ("balance_sheet.Total Debt",),
+    )
     return debt
 
 
@@ -1096,13 +1138,94 @@ def map_cash_series(
 
     return map_statement_series(
         balance_sheet,
-        ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"),
+        (
+            "Cash And Cash Equivalents",
+            "Cash Cash Equivalents And Short Term Investments",
+        ),
         ticker,
         "cash and cash equivalents",
         statement_name="balance_sheet",
         absolute=True,
         metadata=metadata,
     )
+
+
+def map_non_operating_assets_series(
+    balance_sheet: "DataFrame",
+    ticker: str,
+    *,
+    metadata: list[SourceMetadata] | None = None,
+) -> "Series | None":
+    """Map identifiable non-operating financial assets when present.
+
+    Parameters
+    ----------
+    balance_sheet:
+        Raw annual balance sheet.
+    ticker:
+        Ticker associated with the statement.
+    metadata:
+        Optional source metadata collection.
+
+    Returns
+    -------
+    pandas.Series | None
+        Chronological positive non-operating assets, or ``None`` when no
+        identifiable row exists.
+    """
+
+    row = select_statement_row(
+        balance_sheet,
+        (
+            "Investments And Other Financial Assets",
+            "Other Investments",
+            "Investment In Financial Assets",
+        ),
+        "non-operating assets",
+        statement_name="balance_sheet",
+        metadata=metadata,
+    )
+    if row is None:
+        return None
+    return chronological_series(row, ticker, "non-operating assets", absolute=True)
+
+
+def map_minority_interest_series(
+    balance_sheet: "DataFrame",
+    ticker: str,
+    *,
+    metadata: list[SourceMetadata] | None = None,
+) -> "Series | None":
+    """Map minority interest as a positive claim when present.
+
+    Parameters
+    ----------
+    balance_sheet:
+        Raw annual balance sheet.
+    ticker:
+        Ticker associated with the statement.
+    metadata:
+        Optional source metadata collection.
+
+    Returns
+    -------
+    pandas.Series | None
+        Chronological positive minority interest, or ``None`` when unavailable.
+    """
+
+    row = select_statement_row(
+        balance_sheet,
+        (
+            "Minority Interest",
+            "Non Controlling Interest In Consolidated Entity",
+        ),
+        "minority interest",
+        statement_name="balance_sheet",
+        metadata=metadata,
+    )
+    if row is None:
+        return None
+    return chronological_series(row, ticker, "minority interest", absolute=True)
 
 
 def map_book_equity_series(
@@ -1130,7 +1253,11 @@ def map_book_equity_series(
 
     return map_statement_series(
         balance_sheet,
-        ("Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"),
+        (
+            "Stockholders Equity",
+            "Common Stock Equity",
+            "Total Equity Gross Minority Interest",
+        ),
         ticker,
         "book equity",
         statement_name="balance_sheet",
@@ -1210,7 +1337,9 @@ def chronological_series(
         Chronological Decimal series preserving period labels.
     """
 
-    converted = series.dropna().map(lambda value: to_decimal(value, ticker, metric_name, absolute=absolute))
+    converted = series.dropna().map(
+        lambda value: to_decimal(value, ticker, metric_name, absolute=absolute)
+    )
     return converted.sort_index()
 
 
@@ -1326,6 +1455,8 @@ __all__ = [
     "map_interest_expense_series",
     "map_invested_capital_series",
     "map_market_cap",
+    "map_minority_interest_series",
+    "map_non_operating_assets_series",
     "map_revenue_series",
     "map_shares_outstanding",
     "map_statement_series",
