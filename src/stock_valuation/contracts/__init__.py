@@ -6,11 +6,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 import pandas as pd
 
 from stock_valuation.errors import InvalidAssumptionsError
+from stock_valuation.redaction import redact_secrets
 
 RATE_OVERRIDE_FIELDS = (
     "tax_rate_override",
@@ -18,6 +20,19 @@ RATE_OVERRIDE_FIELDS = (
     "risk_free_rate_override",
     "terminal_growth_rate_override",
 )
+
+
+class DiagnosticCategory(StrEnum):
+    """Stable diagnostic categories used in JSON and human output."""
+
+    SOURCE = "source"
+    FALLBACK = "fallback"
+    OVERRIDE = "override"
+    PROVIDER = "provider"
+    NORMALIZATION = "normalization"
+    WARNING = "warning"
+    FAILURE = "failure"
+    CALCULATION = "calculation"
 
 
 @dataclass(frozen=True)
@@ -42,9 +57,13 @@ class Diagnostic:
         Fallback sources attempted before the diagnostic was emitted.
     suggested_override:
         Optional user-supplied override that can resolve the diagnostic.
+    selected_fallback:
+        Fallback source selected after primary-source failure.
+    metadata:
+        Secret-safe structured context.
     """
 
-    kind: str
+    kind: DiagnosticCategory | str
     message: str
     ticker: str | None = None
     metric: str | None = None
@@ -52,6 +71,43 @@ class Diagnostic:
     source_attempted: str | None = None
     fallbacks_attempted: tuple[str, ...] = ()
     suggested_override: str | None = None
+    selected_fallback: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Normalize category and redact public diagnostic content."""
+
+        try:
+            kind = DiagnosticCategory(self.kind)
+        except ValueError:
+            kind = self.kind
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "message", str(redact_secrets(self.message)))
+        object.__setattr__(
+            self,
+            "source_attempted",
+            redact_secrets(self.source_attempted),
+        )
+        object.__setattr__(
+            self,
+            "fallbacks_attempted",
+            tuple(str(redact_secrets(item)) for item in self.fallbacks_attempted),
+        )
+        object.__setattr__(
+            self,
+            "suggested_override",
+            redact_secrets(self.suggested_override),
+        )
+        object.__setattr__(
+            self,
+            "selected_fallback",
+            redact_secrets(self.selected_fallback),
+        )
+        object.__setattr__(
+            self,
+            "metadata",
+            redact_secrets(dict(self.metadata)),
+        )
 
 
 @dataclass(frozen=True)
@@ -604,6 +660,7 @@ __all__ = [
     "CostOfDebtResult",
     "CostOfEquityResult",
     "Diagnostic",
+    "DiagnosticCategory",
     "DiscountResult",
     "EquityBridgeResult",
     "EstimatedGrowthResult",

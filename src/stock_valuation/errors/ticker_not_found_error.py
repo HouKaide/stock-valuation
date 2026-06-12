@@ -23,9 +23,10 @@ class TickerNotFoundError(StockValuationError):
         source_attempted: str | None = None,
         suggested_override: str | None = "Provide a valid Yahoo Finance ticker.",
     ) -> None:
-        self.ticker = ticker
         self.symbol = ticker
-        self.source_attempted = source_attempted
-        self.fallbacks_attempted: tuple[str, ...] = ()
-        self.suggested_override = suggested_override
-        super().__init__(f"Ticker '{ticker}' could not be found.")
+        super().__init__(
+            f"Ticker '{ticker}' could not be found.",
+            ticker=ticker,
+            source_attempted=source_attempted,
+            suggested_override=suggested_override,
+        )

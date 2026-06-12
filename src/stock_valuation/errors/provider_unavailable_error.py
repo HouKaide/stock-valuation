@@ -34,10 +34,12 @@ class ProviderUnavailableError(StockValuationError):
         suggested_override: str | None = None,
     ) -> None:
         self.provider_name = provider_name
-        self.provider = provider_name
         self.input_name = input_name
-        self.metric_name = input_name
-        self.source_attempted = source_attempted
-        self.fallbacks_attempted = tuple(fallbacks_attempted or ())
-        self.suggested_override = suggested_override
-        super().__init__(f"Provider '{provider_name}' is unavailable for {input_name}.")
+        super().__init__(
+            f"Provider '{provider_name}' is unavailable for {input_name}.",
+            metric=input_name,
+            provider=provider_name,
+            source_attempted=source_attempted,
+            fallbacks_attempted=fallbacks_attempted or (),
+            suggested_override=suggested_override,
+        )

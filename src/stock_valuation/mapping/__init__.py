@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import pandas as pd
 
-from stock_valuation.errors import MetricUnavailableError, UnsupportedCurrencyError
+from stock_valuation.errors import (
+    MetricUnavailableError,
+    NormalizationError,
+    UnsupportedCurrencyError,
+)
 
 if TYPE_CHECKING:
     from pandas import DataFrame, Series
@@ -230,7 +234,7 @@ def to_decimal(
 
     Raises
     ------
-    MetricUnavailableError
+    NormalizationError
         If the value is null, non-numeric, NaN, or infinite.
     """
 
@@ -243,10 +247,11 @@ def to_decimal(
         if not decimal_value.is_finite():
             raise ValueError
     except (InvalidOperation, TypeError, ValueError) as error:
-        raise MetricUnavailableError(
-            ticker,
+        raise NormalizationError(
             metric_name,
             source_attempted="numeric scalar conversion",
+            raw_value=value,
+            ticker=ticker,
         ) from error
     return abs(decimal_value) if absolute else decimal_value
 

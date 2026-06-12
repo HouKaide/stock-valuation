@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from stock_valuation.errors.stock_valuation_error import StockValuationError
+from stock_valuation.redaction import redact_secrets
 
 
 class InvalidAssumptionsError(StockValuationError):
@@ -40,21 +41,27 @@ class InvalidAssumptionsError(StockValuationError):
         terminal_growth_rate: Any | None = None,
     ) -> None:
         self.field_name = field_name
-        self.metric_name = field_name
-        self.suggested_override = suggested_override
         self.period = period
-        self.value = value
-        self.wacc = wacc
-        self.terminal_growth_rate = terminal_growth_rate
+        self.value = redact_secrets(value, field_name=field_name)
+        self.wacc = redact_secrets(wacc)
+        self.terminal_growth_rate = redact_secrets(terminal_growth_rate)
         context = ""
         if period is not None:
             context += f" Period: {period}."
-        if value is not None:
-            context += f" Value: {value}."
-        if wacc is not None:
-            context += f" WACC: {wacc}."
-        if terminal_growth_rate is not None:
-            context += f" Terminal growth rate: {terminal_growth_rate}."
+        if self.value is not None:
+            context += f" Value: {self.value}."
+        if self.wacc is not None:
+            context += f" WACC: {self.wacc}."
+        if self.terminal_growth_rate is not None:
+            context += f" Terminal growth rate: {self.terminal_growth_rate}."
         super().__init__(
-            f"Invalid valuation assumption '{field_name}': {message}{context}"
+            f"Invalid valuation assumption '{field_name}': {message}{context}",
+            metric=field_name,
+            suggested_override=suggested_override,
+            metadata={
+                "period": period,
+                "value": self.value,
+                "wacc": self.wacc,
+                "terminal_growth_rate": self.terminal_growth_rate,
+            },
         )
