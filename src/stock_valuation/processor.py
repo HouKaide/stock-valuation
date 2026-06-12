@@ -958,8 +958,20 @@ class DamodaranValuationProcessor:
             market_value_of_debt / total_capital,
         )
 
-    def wacc(self) -> WaccResult:
+    def wacc(
+        self,
+        *,
+        cost_of_equity_result: CostOfEquityResult | None = None,
+        cost_of_debt_result: CostOfDebtResult | None = None,
+    ) -> WaccResult:
         """Calculate weighted average cost of capital with full breakdown.
+
+        Parameters
+        ----------
+        cost_of_equity_result:
+            Optional precomputed cost-of-equity result.
+        cost_of_debt_result:
+            Optional precomputed cost-of-debt result.
 
         Returns
         -------
@@ -969,10 +981,10 @@ class DamodaranValuationProcessor:
         """
 
         start = len(self.diagnostics)
-        equity_cost = self.cost_of_equity()
+        equity_cost = cost_of_equity_result or self.cost_of_equity()
         market_equity = self.market_value_of_equity()
         market_debt = self.market_value_of_debt()
-        debt_cost = self.cost_of_debt()
+        debt_cost = cost_of_debt_result or self.cost_of_debt()
         total_capital, equity_weight, debt_weight = self.capital_weights(
             market_equity,
             market_debt,
@@ -1723,6 +1735,57 @@ class DamodaranValuationProcessor:
                 value=current_price,
             )
         return intrinsic_value_per_share / current_price - Decimal("1")
+
+    def value(self) -> ValuationResult:
+        """Run the complete valuation workflow.
+
+        Returns
+        -------
+        ValuationResult
+            Complete valuation result with calculations and diagnostics.
+        """
+
+        assumptions = self._require_assumptions()
+        fcff = self.calculate_fcff()
+        growth = self.estimated_growth()
+        cost_of_equity = self.cost_of_equity()
+        cost_of_debt = self.cost_of_debt()
+        wacc = self.wacc(
+            cost_of_equity_result=cost_of_equity,
+            cost_of_debt_result=cost_of_debt,
+        )
+        forecast_fcffs = [
+            fcff.fcff * ((Decimal("1") + growth.estimated_growth) ** year)
+            for year in range(1, assumptions.forecast_years + 1)
+        ]
+        forecast_table = pd.DataFrame(
+            {
+                "year": range(1, assumptions.forecast_years + 1),
+                "fcff": forecast_fcffs,
+            }
+        )
+        terminal_growth = self.terminal_growth_rate()
+        terminal_value = self.terminal_value(
+            forecast_fcffs[-1],
+            wacc.wacc,
+            terminal_growth.yield_value,
+            assumptions.forecast_years,
+        )
+        discounting = self.discount_to_today(
+            forecast_fcffs,
+            wacc.wacc,
+            terminal_value.terminal_value,
+        )
+        return self.assemble_valuation_result(
+            forecast_table=forecast_table,
+            fcff=fcff,
+            growth=growth,
+            cost_of_equity=cost_of_equity,
+            cost_of_debt=cost_of_debt,
+            wacc=wacc,
+            terminal_value=terminal_value,
+            discounting=discounting,
+        )
 
     def assemble_valuation_result(
         self,
