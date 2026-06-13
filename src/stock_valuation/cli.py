@@ -28,6 +28,7 @@ from stock_valuation.errors import (
 from stock_valuation.processor import DamodaranValuationProcessor
 from stock_valuation.providers import (
     EquityRiskPremiumProvider,
+    FxRateProvider,
     MacroRateProvider,
     MarketDebtProvider,
     ProviderConfig,
@@ -62,6 +63,7 @@ CLI_TO_ASSUMPTION_FIELD = {
 PROVIDER_KINDS = {
     "macro",
     "erp",
+    "fx",
     "tax_rate",
     "market_debt",
     "sovereign_yield",
@@ -87,6 +89,7 @@ class ProviderBundle:
     tax_rate_provider: TaxRateProvider | None = None
     market_debt_provider: MarketDebtProvider | None = None
     sovereign_yield_provider: SovereignYieldProvider | None = None
+    fx_rate_provider: FxRateProvider | None = None
 
 
 @dataclass(frozen=True)
@@ -306,6 +309,7 @@ def configure_providers(
         sovereign_yield_provider=cast(
             SovereignYieldProvider | None, configured.get("sovereign_yield")
         ),
+        fx_rate_provider=cast(FxRateProvider | None, configured.get("fx")),
     )
 
 
@@ -332,6 +336,7 @@ def build_valuation_workflow(
         tax_rate_provider=providers.tax_rate_provider,
         market_debt_provider=providers.market_debt_provider,
         sovereign_yield_provider=providers.sovereign_yield_provider,
+        fx_rate_provider=providers.fx_rate_provider,
     )
     processor.diagnostics.extend(diagnostics)
     return processor

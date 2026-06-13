@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from stock_valuation.errors.stock_valuation_error import StockValuationError
@@ -27,6 +28,8 @@ class InvalidAssumptionsError(StockValuationError):
         Optional WACC associated with a terminal-growth validation failure.
     terminal_growth_rate:
         Optional terminal growth associated with a validation failure.
+    source_rows:
+        Optional normalized source rows used for the invalid calculation.
     """
 
     def __init__(
@@ -39,12 +42,14 @@ class InvalidAssumptionsError(StockValuationError):
         value: Any | None = None,
         wacc: Any | None = None,
         terminal_growth_rate: Any | None = None,
+        source_rows: Sequence[str] = (),
     ) -> None:
         self.field_name = field_name
         self.period = period
         self.value = redact_secrets(value, field_name=field_name)
         self.wacc = redact_secrets(wacc)
         self.terminal_growth_rate = redact_secrets(terminal_growth_rate)
+        self.source_rows = tuple(str(redact_secrets(row)) for row in source_rows)
         context = ""
         if period is not None:
             context += f" Period: {period}."
@@ -63,5 +68,6 @@ class InvalidAssumptionsError(StockValuationError):
                 "value": self.value,
                 "wacc": self.wacc,
                 "terminal_growth_rate": self.terminal_growth_rate,
+                "source_rows": self.source_rows,
             },
         )

@@ -31,6 +31,7 @@ from stock_valuation.errors import (
 )
 from stock_valuation.providers import (
     EquityRiskPremiumProvider,
+    FxRateProvider,
     MacroRateProvider,
     MarketDebtProvider,
     SovereignYieldProvider,
@@ -45,6 +46,7 @@ def validate_positive_operating_base(
     *,
     period: Any | None = None,
     suggested_override: str | None = None,
+    source_rows: Sequence[str] = (),
 ) -> None:
     """Require a finite, positive Decimal operating-base value.
 
@@ -58,6 +60,8 @@ def validate_positive_operating_base(
         Optional source period associated with the value.
     suggested_override:
         Optional action that can resolve the invalid operating base.
+    source_rows:
+        Normalized source rows used to calculate the operating base.
 
     Raises
     ------
@@ -72,6 +76,7 @@ def validate_positive_operating_base(
             suggested_override=suggested_override,
             period=period,
             value=value,
+            source_rows=source_rows,
         )
 
 
@@ -111,6 +116,7 @@ def calculate_nopat(
         nopat,
         period=period,
         suggested_override="Provide positive EBIT and a valid tax-rate override.",
+        source_rows=("EBIT", "tax_rate"),
     )
     return nopat
 
@@ -210,6 +216,9 @@ class DamodaranValuationProcessor:
         Optional provider for market debt values.
     sovereign_yield_provider:
         Optional provider for deterministic sovereign-yield discovery.
+    fx_rate_provider:
+        Optional provider for converting trading-currency market values into
+        the valuation currency.
     """
 
     stock: Stock
@@ -219,7 +228,9 @@ class DamodaranValuationProcessor:
     tax_rate_provider: TaxRateProvider | None = None
     market_debt_provider: MarketDebtProvider | None = None
     sovereign_yield_provider: SovereignYieldProvider | None = None
+    fx_rate_provider: FxRateProvider | None = None
     diagnostics: list[Diagnostic] = field(default_factory=list, init=False)
+    _stock_metadata_count: int = field(default=0, init=False, repr=False)
 
     def calculate_fcff(self) -> FcffResult:
         """Calculate free cash flow to the firm from normalized inputs.
@@ -236,6 +247,7 @@ class DamodaranValuationProcessor:
         """
 
         inputs = self.stock.latest_fcff_inputs()
+        self._record_stock_mapping_diagnostics()
         nopat = calculate_nopat(inputs.ebit, inputs.tax_rate, period=inputs.period)
         fcff = (
             nopat
@@ -248,6 +260,13 @@ class DamodaranValuationProcessor:
             fcff,
             period=inputs.period,
             suggested_override="Review normalized FCFF inputs or provide valid valuation assumptions.",
+            source_rows=(
+                "EBIT",
+                "tax_rate",
+                "Depreciation And Amortization",
+                "Capital Expenditure",
+                "Change In Working Capital",
+            ),
         )
         diagnostic = Diagnostic(
             kind="calculation",
@@ -451,6 +470,7 @@ class DamodaranValuationProcessor:
         common_periods = reinvestment.index.intersection(
             return_on_capital.index
         ).sort_values()
+        self._record_stock_mapping_diagnostics()
         if common_periods.empty:
             raise MetricUnavailableError(
                 self._ticker(),
@@ -700,6 +720,7 @@ class DamodaranValuationProcessor:
         """
 
         market_cap = self.stock.market_cap()
+        self._record_stock_mapping_diagnostics()
         if market_cap is None or market_cap <= 0:
             raise MetricUnavailableError(
                 self._ticker(),
@@ -707,6 +728,10 @@ class DamodaranValuationProcessor:
                 source_attempted="Stock.market_cap",
                 suggested_override="Provide a positive market capitalization source.",
             )
+        market_cap = self._convert_market_amount(
+            market_cap,
+            metric_name="market value of equity",
+        )
         self._record_diagnostic(
             Diagnostic(
                 kind="source",
@@ -775,7 +800,7 @@ class DamodaranValuationProcessor:
                 metric="market value of debt",
                 provider=(
                     type(self.market_debt_provider).__name__
-                    if source_kind == "provider"
+                    if self.market_debt_provider is not None
                     else None
                 ),
                 source_attempted=source,
@@ -881,6 +906,7 @@ class DamodaranValuationProcessor:
         start = len(self.diagnostics)
         average_debt, debt_periods = self._average_debt_details()
         interest = self.stock.interest_expense_series().sort_index()
+        self._record_stock_mapping_diagnostics()
         current_period = debt_periods[-1]
         if current_period not in interest.index:
             raise MetricUnavailableError(
@@ -1386,6 +1412,7 @@ class DamodaranValuationProcessor:
 
         try:
             cash_series = self.stock.cash_series().sort_index()
+            self._record_stock_mapping_diagnostics()
             if cash_series.empty:
                 raise MetricUnavailableError(
                     self._ticker(),
@@ -1602,6 +1629,7 @@ class DamodaranValuationProcessor:
             )
         else:
             shares = self.stock.shares_outstanding()
+            self._record_stock_mapping_diagnostics()
             if not isinstance(shares, Decimal) or not shares.is_finite() or shares <= 0:
                 raise MetricUnavailableError(
                     self._ticker(),
@@ -1664,6 +1692,7 @@ class DamodaranValuationProcessor:
 
         try:
             price = self.stock.current_price()
+            self._record_stock_mapping_diagnostics()
         except MetricUnavailableError:
             self._record_diagnostic(
                 Diagnostic(
@@ -1675,6 +1704,7 @@ class DamodaranValuationProcessor:
                 )
             )
             return None
+        price = self._convert_market_amount(price, metric_name="current price")
         self._record_diagnostic(
             Diagnostic(
                 kind="source",
@@ -1846,6 +1876,7 @@ class DamodaranValuationProcessor:
         )
         current_price = self.current_price()
         upside_downside = self.upside_downside(intrinsic_value, current_price)
+        self._record_stock_mapping_diagnostics()
         return ValuationResult(
             ticker=self._ticker(),
             valuation_date=assumptions.valuation_date,
@@ -1902,6 +1933,7 @@ class DamodaranValuationProcessor:
                 capital,
                 period=period,
                 suggested_override="Provide positive prior-period invested capital.",
+                source_rows=("Invested Capital",),
             )
             nopat = calculate_nopat(ebit.loc[period], inputs.tax_rate, period=period)
             values.append(nopat / capital)
@@ -1971,6 +2003,102 @@ class DamodaranValuationProcessor:
     def _record_diagnostic(self, diagnostic: Diagnostic) -> None:
         if diagnostic not in self.diagnostics:
             self.diagnostics.append(diagnostic)
+
+    def _convert_market_amount(
+        self,
+        amount: Decimal,
+        *,
+        metric_name: str,
+    ) -> Decimal:
+        assumptions = self._require_assumptions()
+        valuation_currency = (
+            assumptions.valuation_currency_override or self.stock.valuation_currency()
+        )
+        trading_currency_method = getattr(self.stock, "trading_currency", None)
+        trading_currency = (
+            trading_currency_method()
+            if callable(trading_currency_method)
+            else valuation_currency
+        )
+        if trading_currency == valuation_currency:
+            return amount
+        if self.fx_rate_provider is None:
+            raise ProviderUnavailableError(
+                "FX rate provider",
+                f"{trading_currency}/{valuation_currency} conversion",
+                suggested_override=(
+                    "Configure an FX provider or use a valuation currency matching "
+                    "the trading currency."
+                ),
+            )
+        converted = self.fx_rate_provider.convert(
+            amount,
+            trading_currency,
+            valuation_currency,
+            assumptions.valuation_date,
+        )
+        rate = self.fx_rate_provider.get_rate(
+            trading_currency,
+            valuation_currency,
+            assumptions.valuation_date,
+        )
+        _validate_decimal_input(
+            metric_name, converted, period=assumptions.valuation_date
+        )
+        _validate_decimal_input("fx_rate", rate, period=assumptions.valuation_date)
+        provider_name = type(self.fx_rate_provider).__name__
+        self._record_diagnostic(
+            Diagnostic(
+                kind="provider",
+                message=(
+                    f"Converted {metric_name} from {trading_currency} to "
+                    f"{valuation_currency} at FX rate {rate} on "
+                    f"{assumptions.valuation_date}."
+                ),
+                ticker=self._ticker(),
+                metric=metric_name,
+                provider=provider_name,
+                source_attempted=f"{trading_currency}/{valuation_currency} FX rate",
+                metadata={
+                    "from_currency": trading_currency,
+                    "to_currency": valuation_currency,
+                    "rate": rate,
+                    "valuation_date": assumptions.valuation_date,
+                },
+            )
+        )
+        return converted
+
+    def _record_stock_mapping_diagnostics(self) -> None:
+        metadata = getattr(self.stock, "mapping_metadata", ())
+        for source in metadata[self._stock_metadata_count :]:
+            selected_source = source.selected_source
+            if selected_source is None:
+                kind = "warning"
+                message = f"No source resolved {source.metric_name}."
+            elif source.used_override:
+                kind = "override"
+                message = f"Used override for {source.metric_name}."
+            elif source.fallbacks_attempted:
+                kind = "fallback"
+                message = (
+                    f"Resolved {source.metric_name} from {selected_source} after "
+                    f"trying {', '.join(source.fallbacks_attempted)}."
+                )
+            else:
+                kind = "source"
+                message = f"Resolved {source.metric_name} from {selected_source}."
+            self._record_diagnostic(
+                Diagnostic(
+                    kind=kind,
+                    message=message,
+                    ticker=self._ticker(),
+                    metric=source.metric_name,
+                    source_attempted=selected_source,
+                    fallbacks_attempted=source.fallbacks_attempted,
+                )
+            )
+        self._stock_metadata_count = len(metadata)
 
 
 def _validate_decimal_input(

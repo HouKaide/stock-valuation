@@ -924,8 +924,14 @@ def map_depreciation_series(
             ("Reconciled Depreciation",),
             "depreciation and amortization",
             statement_name="income_statement",
-            metadata=metadata,
         )
+        if row is not None:
+            _record(
+                metadata,
+                "depreciation and amortization",
+                "income_statement.Reconciled Depreciation",
+                tuple(f"cashflow.{name}" for name in row_names),
+            )
     row = require_metric(
         row,
         ticker,
@@ -1301,7 +1307,7 @@ def map_invested_capital_series(
         metadata=metadata,
     )
     if row is not None:
-        return chronological_series(row, ticker, "invested capital", absolute=True)
+        return chronological_series(row, ticker, "invested capital")
     debt = map_debt_series(balance_sheet, ticker, metadata=metadata)
     equity = map_book_equity_series(balance_sheet, ticker, metadata=metadata)
     cash = map_cash_series(balance_sheet, ticker, metadata=metadata)
