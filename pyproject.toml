@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pandas>=2.2,<3.0",
+    "pandas-stubs~=2.3.3",
     "yfinance>=0.2.54,<0.3.0",
 ]
 

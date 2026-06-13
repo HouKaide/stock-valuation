@@ -33,11 +33,13 @@ class MarketDataUnavailableError(StockValuationError):
         fallbacks_attempted: Sequence[str] | None = None,
         suggested_override: str | None = None,
     ) -> None:
-        self.ticker = ticker
         self.symbol = ticker
         self.data_name = data_name
-        self.metric_name = data_name
-        self.source_attempted = source_attempted
-        self.fallbacks_attempted = tuple(fallbacks_attempted or ())
-        self.suggested_override = suggested_override
-        super().__init__(f"{data_name} is unavailable for ticker '{ticker}'.")
+        super().__init__(
+            f"{data_name} is unavailable for ticker '{ticker}'.",
+            ticker=ticker,
+            metric=data_name,
+            source_attempted=source_attempted,
+            fallbacks_attempted=fallbacks_attempted or (),
+            suggested_override=suggested_override,
+        )
